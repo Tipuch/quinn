@@ -35,6 +35,13 @@ pub(super) struct MinMax {
 }
 
 impl MinMax {
+    pub fn new(window: u64) -> Self {
+        Self {
+            window,
+            samples: [Default::default(); 3],
+        }
+    }
+    
     pub(super) fn get(&self) -> u64 {
         self.samples[0].value
     }

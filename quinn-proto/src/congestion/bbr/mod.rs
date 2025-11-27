@@ -14,6 +14,7 @@ use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
 
 mod bw_estimation;
 mod min_max;
+mod bbrv3;
 
 /// Experimental! Use at your own risk.
 ///
