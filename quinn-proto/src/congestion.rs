@@ -29,6 +29,7 @@ pub trait Controller: Send + Sync {
         now: Instant,
         sent: Instant,
         bytes: u64,
+        largest_acked: Option<u64>,
         app_limited: bool,
         rtt: &RttEstimator,
     ) {

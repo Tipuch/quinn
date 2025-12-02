@@ -46,6 +46,7 @@ impl Controller for NewReno {
         _now: Instant,
         sent: Instant,
         bytes: u64,
+        _largest_acked: Option<u64>,
         app_limited: bool,
         _rtt: &RttEstimator,
     ) {

@@ -1635,6 +1635,7 @@ impl Connection {
                 now,
                 info.time_sent,
                 info.size.into(),
+                info.largest_acked,
                 self.app_limited,
                 &self.path.rtt,
             );

@@ -398,6 +398,7 @@ impl Controller for Bbr {
         now: Instant,
         sent: Instant,
         bytes: u64,
+        _largest_acked: Option<u64>,
         app_limited: bool,
         rtt: &RttEstimator,
     ) {
