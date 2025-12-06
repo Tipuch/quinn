@@ -303,10 +303,6 @@ impl RttEstimator {
         }
     }
 
-    pub fn latest(&self) -> Duration {
-        self.latest
-    }
-
     /// The current best RTT estimation.
     pub fn get(&self) -> Duration {
         self.smoothed.unwrap_or(self.latest)
