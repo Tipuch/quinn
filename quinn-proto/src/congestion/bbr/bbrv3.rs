@@ -1,11 +1,11 @@
+use super::min_max::MinMax;
+use crate::RttEstimator;
+use crate::congestion::{Controller, ControllerMetrics};
+use rand::Rng;
 use std::any::Any;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use rand::Rng;
-use super::min_max::MinMax;
-use crate::congestion::{Controller, ControllerMetrics};
-use crate::RttEstimator;
 
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
@@ -251,7 +251,7 @@ impl Bbr3 {
             probe_rtt_round_done: false,
             prior_cwnd: 0,
             loss_round_start: false,
-            startup_full_loss_cnt: 6
+            startup_full_loss_cnt: 6,
         }
     }
 
@@ -279,7 +279,8 @@ impl Bbr3 {
         if let Some(rate_sample) = self.rs {
             inflight_prev = rate_sample.tx_in_flight - lost_bytes;
             let lost_prev = rate_sample.lost - lost_bytes;
-            let lost_prefix = (self.loss_thresh * (inflight_prev - lost_prev) as f64) / (1.0 - self.loss_thresh);
+            let lost_prefix =
+                (self.loss_thresh * (inflight_prev - lost_prev) as f64) / (1.0 - self.loss_thresh);
             let inflight_at_loss = inflight_prev - lost_prefix as u64;
             return inflight_at_loss;
         }
@@ -318,7 +319,10 @@ impl Bbr3 {
         self.bw_probe_samples = false;
         if let Some(rate_sample) = self.rs {
             if !rate_sample.is_app_limited {
-                self.inflight_longterm = max(rate_sample.tx_in_flight, (self.target_inflight() as f64 * self.beta) as u64);
+                self.inflight_longterm = max(
+                    rate_sample.tx_in_flight,
+                    (self.target_inflight() as f64 * self.beta) as u64,
+                );
             }
         }
 
@@ -329,7 +333,7 @@ impl Bbr3 {
 
     fn is_inflight_too_high(&self) -> bool {
         if let Some(rate_sample) = self.rs {
-            return rate_sample.lost as f64 > (rate_sample.tx_in_flight) as f64 * self.loss_thresh
+            return rate_sample.lost as f64 > (rate_sample.tx_in_flight) as f64 * self.loss_thresh;
         }
         false
     }
@@ -402,7 +406,7 @@ impl Bbr3 {
     }
 
     // BBRIsTimeToGoDown in IETF spec
-    fn maybe_go_down(&mut self) -> bool{
+    fn maybe_go_down(&mut self) -> bool {
         if self.is_cwnd_limited && self.cwnd >= self.inflight_longterm {
             self.reset_full_bw();
             if let Some(rate_sample) = self.rs {
@@ -437,7 +441,7 @@ impl Bbr3 {
         let mut inflight_cap = max(inflight_cap, self.offload_budget);
         inflight_cap = max(inflight_cap, self.min_pipe_cwnd);
         if self.state == BbrState::ProbeBw(ProbeBwSubstate::Up) {
-            inflight_cap += 2*self.smss;
+            inflight_cap += 2 * self.smss;
         }
         inflight_cap
     }
@@ -488,7 +492,10 @@ impl Bbr3 {
         if self.inflight_longterm == u64::MAX {
             return u64::MAX;
         }
-        let total_headroom = max(self.smss, (self.headroom * self.inflight_longterm as f64) as u64);
+        let total_headroom = max(
+            self.smss,
+            (self.headroom * self.inflight_longterm as f64) as u64,
+        );
         max(self.inflight_longterm - total_headroom, self.min_pipe_cwnd)
     }
 
@@ -501,8 +508,8 @@ impl Bbr3 {
 
     fn raise_inflight_long_term_slope(&mut self) {
         let growth_this_round = 2u64.pow(self.bw_probe_up_rounds as u32);
-        self.bw_probe_up_rounds = min(self.bw_probe_up_rounds+1, 30);
-        self.probe_up_cnt = max(self.cwnd/growth_this_round, 1);
+        self.bw_probe_up_rounds = min(self.bw_probe_up_rounds + 1, 30);
+        self.probe_up_cnt = max(self.cwnd / growth_this_round, 1);
     }
 
     fn probe_inflight_long_term_upward(&mut self) {
@@ -540,8 +547,7 @@ impl Bbr3 {
                     } else {
                         self.advance_max_bw_filter();
                     }
-
-                },
+                }
                 _ => {}
             }
         }
@@ -591,13 +597,22 @@ impl Bbr3 {
 
     fn loss_lower_bounds(&mut self) {
         // gives max of both f64
-        self.bw_shortterm = [self.bw_latest, self.beta * self.bw_shortterm].iter().copied().fold(f64::NAN, f64::max);
-        self.inflight_shortterm = max(self.inflight_latest, (self.beta * self.inflight_shortterm as f64) as u64);
+        self.bw_shortterm = [self.bw_latest, self.beta * self.bw_shortterm]
+            .iter()
+            .copied()
+            .fold(f64::NAN, f64::max);
+        self.inflight_shortterm = max(
+            self.inflight_latest,
+            (self.beta * self.inflight_shortterm as f64) as u64,
+        );
     }
 
     fn bound_bw_for_model(&mut self) {
         // gives min of both f64
-        self.bw = [self.max_bw, self.bw_shortterm].iter().copied().fold(f64::NAN, f64::min);
+        self.bw = [self.max_bw, self.bw_shortterm]
+            .iter()
+            .copied()
+            .fold(f64::NAN, f64::min);
     }
 
     fn start_probe_bw_refill(&mut self) {
@@ -633,11 +648,13 @@ impl Bbr3 {
             match self.state {
                 BbrState::ProbeBw(_) => {
                     self.set_pacing_rate_with_gain(1.0);
-                },
+                }
                 BbrState::ProbeRtt => {
                     self.check_probe_rtt_done();
-                },
-                _ => {return;}
+                }
+                _ => {
+                    return;
+                }
             }
         }
     }
@@ -655,23 +672,23 @@ impl Bbr3 {
                 if self.maybe_update_budget_and_time_to_cruise() {
                     self.start_probe_bw_cruise();
                 }
-            },
+            }
             BbrState::ProbeBw(ProbeBwSubstate::Cruise) => {
                 if self.maybe_enter_probe_bw_refill() {
                     return;
                 }
-            },
+            }
             BbrState::ProbeBw(ProbeBwSubstate::Refill) => {
                 if self.round_start {
                     self.bw_probe_samples = true;
                     self.start_probe_bw_up();
                 }
-            },
+            }
             BbrState::ProbeBw(ProbeBwSubstate::Up) => {
                 if self.maybe_go_down() {
                     self.start_probe_bw_down();
                 }
-            },
+            }
             _ => {
                 return;
             }
@@ -681,7 +698,10 @@ impl Bbr3 {
     fn update_latest_delivery_signals(&mut self) {
         self.loss_round_start = false;
         if let Some(rate_sample) = self.rs {
-            self.bw_latest = [self.bw_latest, rate_sample.delivery_rate].iter().copied().fold(f64::NAN, f64::max);
+            self.bw_latest = [self.bw_latest, rate_sample.delivery_rate]
+                .iter()
+                .copied()
+                .fold(f64::NAN, f64::max);
         }
         self.inflight_latest = max(self.inflight_latest, self.delivered);
         if let Some(rate_sample) = self.rs {
@@ -690,14 +710,13 @@ impl Bbr3 {
                 self.loss_round_start = true;
             }
         }
-
     }
 
     fn adapt_lower_bounds_from_congestion(&mut self) {
         match self.state {
             BbrState::ProbeBw(_) => {
                 return;
-            },
+            }
             _ => {
                 if self.loss_in_round {
                     self.init_lower_bounds();
@@ -777,7 +796,7 @@ impl Bbr3 {
     fn check_startup_done(&mut self) {
         self.check_startup_high_loss();
         if self.state == BbrState::Startup && self.full_bw_reached {
-           self.enter_drain();
+            self.enter_drain();
         }
     }
 
@@ -794,7 +813,9 @@ impl Bbr3 {
             self.probe_rtt_expired = true;
         }
         if let Some(rate_sample) = self.rs {
-            if rate_sample.rtt >= Duration::from_secs(0) && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired) {
+            if rate_sample.rtt >= Duration::from_secs(0)
+                && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired)
+            {
                 self.probe_rtt_min_delay = self.rtt;
                 self.probe_rtt_min_stamp = Some(Instant::now());
             }
@@ -802,7 +823,8 @@ impl Bbr3 {
 
         let min_rtt_expired;
         if let Some(min_rtt_stamp) = self.min_rtt_stamp {
-            min_rtt_expired = Instant::now() > min_rtt_stamp + Duration::from_secs(self.min_rtt_filter_len);
+            min_rtt_expired =
+                Instant::now() > min_rtt_stamp + Duration::from_secs(self.min_rtt_filter_len);
         } else {
             min_rtt_expired = true;
         }
@@ -833,7 +855,7 @@ impl Bbr3 {
         match self.state {
             BbrState::ProbeRtt => {
                 self.handle_probe_rtt();
-            },
+            }
             _ => {
                 if self.probe_rtt_expired && !self.idle_restart {
                     self.enter_probe_rtt();
@@ -887,13 +909,13 @@ impl Bbr3 {
         match self.state {
             BbrState::ProbeRtt => {
                 cap = self.inflight_with_headroom();
-            },
+            }
             BbrState::ProbeBw(ProbeBwSubstate::Cruise) => {
                 cap = self.inflight_with_headroom();
-            },
+            }
             BbrState::ProbeBw(_) => {
                 cap = self.inflight_longterm;
-            },
+            }
             _ => {}
         }
         cap = min(cap, self.inflight_shortterm);
@@ -937,7 +959,8 @@ impl Bbr3 {
                 return;
             }
             if rate_sample.interval != Duration::from_secs(0) {
-                rate_sample.delivery_rate = self.delivered as f64 / rate_sample.interval.as_secs() as f64;
+                rate_sample.delivery_rate =
+                    self.delivered as f64 / rate_sample.interval.as_secs() as f64;
             }
         }
     }
@@ -965,7 +988,7 @@ impl Controller for Bbr3 {
             self.first_send_time = now;
             self.inflight += bytes;
         }
-        self.packets.push_back(BbrPacket{
+        self.packets.push_back(BbrPacket {
             delivered: self.delivered,
             delivered_time: self.delivered_time,
             first_send_time: now,
@@ -990,8 +1013,9 @@ impl Controller for Bbr3 {
         rtt: &RttEstimator,
     ) {
         if let Some(packet_number) = largest_acked {
-            let p_result = self.packets.binary_search_by_key(&packet_number,
-                                                             |&p| p.end_seq);
+            let p_result = self
+                .packets
+                .binary_search_by_key(&packet_number, |&p| p.end_seq);
             if let Ok(p_index) = p_result {
                 let p = self.packets[p_index];
                 self.delivered += bytes;
@@ -1058,7 +1082,7 @@ impl Controller for Bbr3 {
         largest_packet_num_acked: Option<u64>,
     ) {
         self.inflight = in_flight;
-        if let Some(largest_packet_num) = largest_packet_num_acked  {
+        if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
                 self.app_limited = largest_packet_num;
             }
@@ -1076,7 +1100,8 @@ impl Controller for Bbr3 {
                 return;
             }
             if rate_sample.interval != Duration::ZERO {
-                rate_sample.delivery_rate = rate_sample.delivered as f64 / rate_sample.interval.as_secs() as f64;
+                rate_sample.delivery_rate =
+                    rate_sample.delivered as f64 / rate_sample.interval.as_secs() as f64;
             }
             self.update_model_and_state(rate_sample.last_packet);
             self.update_control_parameters();
@@ -1090,11 +1115,12 @@ impl Controller for Bbr3 {
         _is_persistent_congestion: bool,
         _is_ecn: bool,
         lost_bytes: u64,
-        largest_lost: u64
+        largest_lost: u64,
     ) {
         self.lost += lost_bytes;
-        let p_result = self.packets.binary_search_by_key(&largest_lost,
-                                                         |&p| p.end_seq);
+        let p_result = self
+            .packets
+            .binary_search_by_key(&largest_lost, |&p| p.end_seq);
         if let Ok(p_index) = p_result {
             self.note_loss();
             let p = &self.packets[p_index];

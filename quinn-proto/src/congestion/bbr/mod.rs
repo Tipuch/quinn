@@ -12,9 +12,9 @@ use crate::{Duration, Instant};
 
 use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
 
+mod bbrv3;
 mod bw_estimation;
 mod min_max;
-mod bbrv3;
 
 /// Experimental! Use at your own risk.
 ///
@@ -469,7 +469,7 @@ impl Controller for Bbr {
         _is_persistent_congestion: bool,
         _is_ecn: bool,
         lost_bytes: u64,
-        _largest_lost: u64
+        _largest_lost: u64,
     ) {
         self.loss_state.lost_bytes += lost_bytes;
     }

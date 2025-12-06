@@ -41,7 +41,7 @@ impl MinMax {
             samples: [Default::default(); 3],
         }
     }
-    
+
     pub(super) fn get(&self) -> u64 {
         self.samples[0].value
     }
