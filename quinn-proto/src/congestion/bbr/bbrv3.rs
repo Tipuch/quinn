@@ -64,7 +64,6 @@ pub(super) struct BbrPacket {
 pub(super) struct BbrRateSample {
     pub delivery_rate: f64,
     pub is_app_limited: bool,
-    pub has_data: bool,
     pub interval: Duration,
     pub delivered: u64,
     pub prior_delivered: u64,
@@ -87,7 +86,6 @@ pub(super) struct Bbr3 {
     delivered: u64,
     inflight: u64,
     is_cwnd_limited: bool,
-    next_send_time: Option<Instant>,
     rtt: Duration,
     cycle_count: u64,
     cwnd: u64,
@@ -141,9 +139,6 @@ pub(super) struct Bbr3 {
     app_limited: u64,
     pending_transmissions: u64,
     lost: u64,
-    lost_out: u64,
-    retrans_out: u64,
-    min_srtt: Duration,
     srtt: Duration,
     packets: VecDeque<BbrPacket>,
     rs: Option<BbrRateSample>,
@@ -161,7 +156,6 @@ pub(super) struct Bbr3 {
     probe_rtt_round_done: bool,
     prior_cwnd: u64,
     loss_round_start: bool,
-    startup_full_loss_cnt: u64,
 }
 
 impl Bbr3 {
@@ -177,7 +171,6 @@ impl Bbr3 {
             delivered: 0,
             inflight: 0,
             is_cwnd_limited: false,
-            next_send_time: None,
             rtt: Duration::ZERO,
             cycle_count: 0,
             cwnd: initial_cwnd,
@@ -231,9 +224,6 @@ impl Bbr3 {
             app_limited: 0,
             pending_transmissions: 0,
             lost: 0,
-            lost_out: 0,
-            retrans_out: 0,
-            min_srtt: Duration::ZERO,
             srtt: Duration::ZERO,
             rs: None,
             packets: VecDeque::new(),
@@ -728,6 +718,15 @@ impl Bbr3 {
 
     fn update_max_bw(&mut self, p: BbrPacket) {
         self.update_round(p);
+        if let Some(rate_sample) = self.rs {
+            if rate_sample.delivery_rate > 0.0
+                && (rate_sample.delivery_rate >= self.max_bw || !rate_sample.is_app_limited)
+            {
+                self.max_bw_filter
+                    .update_max(self.cycle_count, rate_sample.delivery_rate.round() as u64);
+                self.max_bw = self.max_bw_filter.get() as f64;
+            }
+        }
     }
 
     fn update_congestion_signals(&mut self, p: BbrPacket) {
@@ -1022,14 +1021,11 @@ impl Controller for Bbr3 {
                 self.delivered_time = now;
                 self.update_round(p);
                 if let Some(mut rate_sample) = self.rs {
-                    let mut is_newest_packet = false;
-
-                    is_newest_packet = self.is_newest_packet(now, packet_number);
-                    if !rate_sample.has_data || is_newest_packet {
-                        rate_sample.has_data = true;
+                    if self.is_newest_packet(now, packet_number) {
                         rate_sample.prior_delivered = p.delivered;
                         rate_sample.prior_time = p.delivered_time;
                         rate_sample.is_app_limited = p.is_app_limited;
+                        rate_sample.newly_acked += bytes;
                         rate_sample.send_elapsed = p.send_time - p.first_send_time;
                         rate_sample.ack_elapsed = self.delivered_time - p.delivered_time;
                         rate_sample.last_end_seq = packet_number;
@@ -1042,7 +1038,6 @@ impl Controller for Bbr3 {
                 } else {
                     let mut rate_sample = BbrRateSample {
                         rtt: rtt.get(),
-                        has_data: false,
                         prior_time: p.delivered_time,
                         interval: Duration::ZERO,
                         delivery_rate: 0.0,
@@ -1059,7 +1054,6 @@ impl Controller for Bbr3 {
                         last_packet: p,
                     };
                     self.rs = Some(rate_sample);
-                    rate_sample.has_data = true;
                     rate_sample.prior_delivered = p.delivered;
                     rate_sample.prior_time = p.delivered_time;
                     rate_sample.is_app_limited = p.is_app_limited;
@@ -1128,6 +1122,7 @@ impl Controller for Bbr3 {
                 return;
             }
             if let Some(mut rate_sample) = self.rs {
+                rate_sample.newly_lost += lost_bytes;
                 rate_sample.tx_in_flight = p.tx_in_flight;
                 rate_sample.lost = self.lost - p.lost;
                 rate_sample.is_app_limited = p.is_app_limited;
