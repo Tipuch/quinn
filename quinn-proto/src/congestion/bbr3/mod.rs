@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
-const MAX_BASE_DATAGRAM: u64 = 100;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum ProbeBwSubstate {
@@ -1173,7 +1172,7 @@ impl Bbr3Config {
 impl Default for Bbr3Config {
     fn default() -> Self {
         Self {
-            initial_window: MAX_BASE_DATAGRAM * BASE_DATAGRAM_SIZE,
+            initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
         }
     }
 }
