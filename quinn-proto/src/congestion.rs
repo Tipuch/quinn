@@ -59,6 +59,7 @@ pub trait Controller: Send + Sync {
         is_persistent_congestion: bool,
         is_ecn: bool,
         lost_bytes: u64,
+        largest_lost: u64,
     );
 
     /// Packets were incorrectly deemed lost

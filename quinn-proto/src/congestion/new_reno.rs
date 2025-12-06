@@ -90,6 +90,7 @@ impl Controller for NewReno {
         is_persistent_congestion: bool,
         _is_ecn: bool,
         _lost_bytes: u64,
+        _largest_lost: u64,
     ) {
         if sent <= self.recovery_start_time {
             return;

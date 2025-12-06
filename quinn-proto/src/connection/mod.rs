@@ -1547,7 +1547,10 @@ impl Connection {
                 // reordering.
                 if new_largest {
                     let sent = self.spaces[space].largest_acked_packet_sent;
-                    self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent);
+                    // largest_sent should always have a value because if new_largest then it has been sent
+                    if let Some(largest_sent) = self.spaces[space].largest_acked_packet {
+                        self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent, largest_sent);
+                    }
                 }
             } else {
                 // We always start out sending ECN, so any ack that doesn't acknowledge it disables it.
@@ -1605,6 +1608,7 @@ impl Connection {
         newly_acked: u64,
         ecn: frame::EcnCounts,
         largest_sent_time: Instant,
+        largest_lost: u64
     ) {
         match self.spaces[space].detect_ecn(newly_acked, ecn) {
             Err(e) => {
@@ -1619,7 +1623,7 @@ impl Connection {
                 self.stats.path.congestion_events += 1;
                 self.path
                     .congestion
-                    .on_congestion_event(now, largest_sent_time, false, true, 0);
+                    .on_congestion_event(now, largest_sent_time, false, true, 0, largest_lost);
             }
         }
     }
@@ -1840,6 +1844,7 @@ impl Connection {
                     in_persistent_congestion,
                     false,
                     size_of_lost_packets,
+                    largest_lost,
                 );
             }
         }
