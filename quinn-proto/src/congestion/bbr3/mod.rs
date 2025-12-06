@@ -1,14 +1,18 @@
-use super::min_max::MinMax;
 use crate::RttEstimator;
-use crate::congestion::{Controller, ControllerMetrics};
+use crate::congestion::bbr::min_max::MinMax;
+use crate::congestion::{
+    BASE_DATAGRAM_SIZE, Bbr, BbrConfig, Controller, ControllerFactory, ControllerMetrics,
+};
 use rand::Rng;
 use std::any::Any;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
+const MAX_BASE_DATAGRAM: u64 = 100;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum ProbeBwSubstate {
@@ -80,7 +84,7 @@ pub(super) struct BbrRateSample {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct Bbr3 {
+pub struct Bbr3 {
     smss: u64,
     initial_cwnd: u64,
     delivered: u64,
@@ -159,12 +163,13 @@ pub(super) struct Bbr3 {
 }
 
 impl Bbr3 {
-    pub(super) fn new(current_mtu: u16, initial_cwnd: u64) -> Self {
+    // TODO make config work here.
+    pub(super) fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
         // rfc9000 making sure maximum datagram size is between acceptable values
         // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
         let mut smss = max(1200, current_mtu) as u64;
         smss = min(smss, 65527);
-
+        let initial_cwnd = config.initial_window;
         Self {
             smss,
             initial_cwnd,
@@ -1163,5 +1168,35 @@ impl Controller for Bbr3 {
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
+    }
+}
+
+/// Configuration for the [`Bbr3`] congestion controller
+#[derive(Debug, Clone)]
+pub struct Bbr3Config {
+    initial_window: u64,
+}
+
+impl Bbr3Config {
+    /// Default limit on the amount of outstanding data in bytes.
+    ///
+    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
+    pub fn initial_window(&mut self, value: u64) -> &mut Self {
+        self.initial_window = value;
+        self
+    }
+}
+
+impl Default for Bbr3Config {
+    fn default() -> Self {
+        Self {
+            initial_window: MAX_BASE_DATAGRAM * BASE_DATAGRAM_SIZE,
+        }
+    }
+}
+
+impl ControllerFactory for Bbr3Config {
+    fn build(self: Arc<Self>, _now: Instant, current_mtu: u16) -> Box<dyn Controller> {
+        Box::new(Bbr3::new(self, current_mtu))
     }
 }
