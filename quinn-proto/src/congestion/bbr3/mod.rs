@@ -1,8 +1,6 @@
 use crate::RttEstimator;
 use crate::congestion::bbr::min_max::MinMax;
-use crate::congestion::{
-    BASE_DATAGRAM_SIZE, Bbr, BbrConfig, Controller, ControllerFactory, ControllerMetrics,
-};
+use crate::congestion::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, ControllerMetrics};
 use rand::Rng;
 use std::any::Any;
 use std::cmp::{max, min};
@@ -83,6 +81,10 @@ pub(super) struct BbrRateSample {
     pub last_packet: BbrPacket,
 }
 
+/// Experimental! Use at your own risk.
+///
+/// Aims for reduced buffer bloat and improved performance over high bandwidth-delay product networks.
+/// Based on https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
 #[derive(Debug, Clone)]
 pub struct Bbr3 {
     smss: u64,
@@ -163,7 +165,6 @@ pub struct Bbr3 {
 }
 
 impl Bbr3 {
-    // TODO make config work here.
     pub(super) fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
         // rfc9000 making sure maximum datagram size is between acceptable values
         // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
@@ -948,24 +949,6 @@ impl Bbr3 {
         self.set_pacing_rate();
         self.set_send_quantum();
         self.set_cwnd();
-    }
-
-    fn generate_rate_sample(&mut self) {
-        if self.app_limited != 0 && self.delivered > self.app_limited {
-            self.app_limited = 0;
-        }
-
-        if let Some(mut rate_sample) = self.rs {
-            rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
-            rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
-            if rate_sample.interval < self.min_rtt {
-                return;
-            }
-            if rate_sample.interval != Duration::from_secs(0) {
-                rate_sample.delivery_rate =
-                    self.delivered as f64 / rate_sample.interval.as_secs() as f64;
-            }
-        }
     }
 
     fn is_newest_packet(&self, send_time: Instant, end_seq: u64) -> bool {

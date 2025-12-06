@@ -13,7 +13,7 @@ use crate::{Duration, Instant};
 use super::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory};
 
 mod bw_estimation;
-pub mod min_max;
+pub(super) mod min_max;
 
 /// Experimental! Use at your own risk.
 ///
