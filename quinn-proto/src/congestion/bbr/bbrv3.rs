@@ -11,7 +11,7 @@ const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum ProbeBwSubstate {
+pub(super) enum ProbeBwSubstate {
     /// Deceleration: sends slower than delivery rate to reduce queue
     Down,
 
@@ -26,7 +26,7 @@ pub enum ProbeBwSubstate {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum BbrState {
+pub(super) enum BbrState {
     /// Initial state: rapidly probes for bandwidth using high pacing_gain
     Startup,
 
@@ -41,7 +41,7 @@ pub enum BbrState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum AckPhase {
+pub(super) enum AckPhase {
     AcksProbeStarting,
     AcksProbeStopping,
     AcksRefilling,
@@ -49,7 +49,7 @@ pub enum AckPhase {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct BbrPacket {
+pub(super) struct BbrPacket {
     pub delivered: u64,
     pub delivered_time: Instant,
     pub first_send_time: Instant,
@@ -61,7 +61,7 @@ pub struct BbrPacket {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct BbrRateSample {
+pub(super) struct BbrRateSample {
     pub delivery_rate: f64,
     pub is_app_limited: bool,
     pub has_data: bool,
@@ -81,7 +81,7 @@ pub struct BbrRateSample {
 }
 
 #[derive(Debug, Clone)]
-pub struct Bbr3 {
+pub(super) struct Bbr3 {
     smss: u64,
     initial_cwnd: u64,
     delivered: u64,
@@ -165,7 +165,7 @@ pub struct Bbr3 {
 }
 
 impl Bbr3 {
-    pub fn new(current_mtu: u16, initial_cwnd: u64) -> Self {
+    pub(super) fn new(current_mtu: u16, initial_cwnd: u64) -> Self {
         // rfc9000 making sure maximum datagram size is between acceptable values
         // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
         let mut smss = max(1200, current_mtu) as u64;
@@ -794,7 +794,7 @@ impl Bbr3 {
             self.probe_rtt_expired = true;
         }
         if let Some(rate_sample) = self.rs {
-            if (rate_sample.rtt >= Duration::from_secs(0) && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired)){
+            if rate_sample.rtt >= Duration::from_secs(0) && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired) {
                 self.probe_rtt_min_delay = self.rtt;
                 self.probe_rtt_min_stamp = Some(Instant::now());
             }

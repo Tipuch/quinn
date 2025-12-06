@@ -35,7 +35,7 @@ pub(super) struct MinMax {
 }
 
 impl MinMax {
-    pub fn new(window: u64) -> Self {
+    pub(super) fn new(window: u64) -> Self {
         Self {
             window,
             samples: [Default::default(); 3],
