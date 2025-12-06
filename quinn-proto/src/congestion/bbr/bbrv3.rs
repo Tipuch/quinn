@@ -241,7 +241,6 @@ impl Bbr3 {
             probe_rtt_round_done: false,
             prior_cwnd: 0,
             loss_round_start: false,
-            startup_full_loss_cnt: 6,
         }
     }
 
