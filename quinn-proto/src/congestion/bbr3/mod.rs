@@ -179,8 +179,8 @@ impl Bbr3 {
             rtt: Duration::ZERO,
             cycle_count: 0,
             cwnd: initial_cwnd,
-            pacing_rate: 0.0,
-            send_quantum: 0,
+            pacing_rate: 2.773 * smss as f64,
+            send_quantum: 2 * smss,
             pacing_gain: 2.773,
             startup_pacing_gain: 2.773,
             drain_pacing_gain: 0.35,
@@ -195,7 +195,7 @@ impl Bbr3 {
             loss_thresh: 0.02,
             beta: 0.7,
             headroom: 0.15,
-            min_pipe_cwnd: 0,
+            min_pipe_cwnd: 4 * smss,
             max_bw: 0.0,
             bw_shortterm: 0.0,
             bw: 0.0,
@@ -1135,7 +1135,7 @@ impl Controller for Bbr3 {
     fn metrics(&self) -> ControllerMetrics {
         ControllerMetrics {
             congestion_window: self.window(),
-            ssthresh: None,
+            ssthresh: Some(u64::MAX),
             pacing_rate: Some((self.pacing_rate * 8.0) as u64),
         }
     }
