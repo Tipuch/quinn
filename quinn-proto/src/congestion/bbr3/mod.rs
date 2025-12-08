@@ -462,10 +462,12 @@ impl Bbr3 {
     }
 
     fn update_round(&mut self, packet: BbrPacket) {
+        eprintln!("packet delivered: {:?}, next_round_delivered: {:?}", packet.delivered, self.next_round_delivered);
         if packet.delivered >= self.next_round_delivered {
             self.start_round();
             self.round_count += 1;
             self.rounds_since_bw_probe += 1;
+            eprintln!("round starting");
             self.round_start = true;
         } else {
             self.round_start = false;
@@ -490,7 +492,11 @@ impl Bbr3 {
             self.smss,
             (self.headroom * self.inflight_longterm as f64) as u64,
         );
-        max(self.inflight_longterm - total_headroom, self.min_pipe_cwnd)
+        if let Some(inflight_with_headroom) = self.inflight_longterm.checked_sub(total_headroom) {
+            max(inflight_with_headroom, self.min_pipe_cwnd)
+        } else {
+            self.min_pipe_cwnd
+        }
     }
 
     fn set_pacing_rate_with_gain(&mut self, gain: f64) {
@@ -696,9 +702,8 @@ impl Bbr3 {
                 .iter()
                 .copied()
                 .fold(f64::NAN, f64::max);
-        }
-        self.inflight_latest = max(self.inflight_latest, self.delivered);
-        if let Some(rate_sample) = self.rs {
+            self.inflight_latest = max(self.inflight_latest, rate_sample.delivered);
+
             if rate_sample.prior_delivered >= self.loss_round_delivered {
                 self.loss_round_delivered = self.delivered;
                 self.loss_round_start = true;
@@ -841,14 +846,17 @@ impl Bbr3 {
 
     fn handle_probe_rtt(&mut self) {
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
+            eprintln!("setting probe_rtt_done_stamp");
             self.probe_rtt_done_stamp = Some(Instant::now() + self.probe_rtt_duration);
             self.probe_rtt_round_done = false;
             self.start_round();
         } else if self.probe_rtt_done_stamp.is_some() {
             if self.round_start {
+                eprintln!("setting probe_rtt_round_done");
                 self.probe_rtt_round_done = true;
             }
             if self.probe_rtt_round_done {
+                eprintln!("checking if probe_rtt_done");
                 self.check_probe_rtt_done();
             }
         }
@@ -884,6 +892,7 @@ impl Bbr3 {
     }
 
     fn update_model_and_state(&mut self, p: BbrPacket) {
+        // eprintln!("Updating model and state, current_state: {:?}", self.state);
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
         self.update_ack_aggregation();
@@ -984,34 +993,39 @@ impl Controller for Bbr3 {
             lost: self.lost,
         });
         self.handle_restart_from_idle(now);
-        // reset rate sample when sending new packets.
-        self.rs = None;
     }
 
     fn on_ack(
         &mut self,
         now: Instant,
-        _sent: Instant,
+        sent: Instant,
         bytes: u64,
         largest_acked: Option<u64>,
-        app_limited: bool,
+        _app_limited: bool,
         rtt: &RttEstimator,
     ) {
+        self.delivered += bytes;
+        self.delivered_time = now;
+        if let Some(mut rate_sample) = self.rs {
+            rate_sample.newly_acked += bytes;
+            rate_sample.rtt = rtt.get();
+            self.srtt = rate_sample.rtt;
+            self.rs = Some(rate_sample);
+        }
         if let Some(packet_number) = largest_acked {
             let p_result = self
                 .packets
                 .binary_search_by_key(&packet_number, |&p| p.end_seq);
             if let Ok(p_index) = p_result {
                 let p = self.packets[p_index];
-                self.delivered += bytes;
-                self.delivered_time = now;
                 self.update_round(p);
                 if let Some(mut rate_sample) = self.rs {
-                    if self.is_newest_packet(now, packet_number) {
+                    if self.is_newest_packet(sent, packet_number) {
+                        // eprintln!("newest packet: {:?}", packet_number);
                         rate_sample.prior_delivered = p.delivered;
                         rate_sample.prior_time = p.delivered_time;
                         rate_sample.is_app_limited = p.is_app_limited;
-                        rate_sample.newly_acked += bytes;
+                        rate_sample.tx_in_flight = p.tx_in_flight;
                         rate_sample.send_elapsed = p.send_time - p.first_send_time;
                         rate_sample.ack_elapsed = self.delivered_time - p.delivered_time;
                         rate_sample.last_end_seq = packet_number;
@@ -1019,33 +1033,26 @@ impl Controller for Bbr3 {
                         rate_sample.last_packet = p;
                         self.packets.remove(p_index);
                     }
-                    rate_sample.rtt = rtt.get();
-                    self.srtt = rate_sample.rtt;
+                    self.rs = Some(rate_sample);
                 } else {
-                    let mut rate_sample = BbrRateSample {
+                    let rate_sample = BbrRateSample {
                         rtt: rtt.get(),
                         prior_time: p.delivered_time,
                         interval: Duration::ZERO,
                         delivery_rate: 0.0,
-                        is_app_limited: app_limited,
+                        is_app_limited: p.is_app_limited,
                         delivered: 0,
-                        prior_delivered: 0,
-                        tx_in_flight: 0,
-                        send_elapsed: Duration::ZERO,
-                        ack_elapsed: Duration::ZERO,
+                        prior_delivered: p.delivered,
+                        tx_in_flight: p.tx_in_flight,
+                        send_elapsed: p.send_time - p.first_send_time,
+                        ack_elapsed: self.delivered_time - p.delivered_time,
                         newly_acked: bytes,
                         newly_lost: 0,
                         lost: 0,
-                        last_end_seq: 0,
+                        last_end_seq: packet_number,
                         last_packet: p,
                     };
                     self.rs = Some(rate_sample);
-                    rate_sample.prior_delivered = p.delivered;
-                    rate_sample.prior_time = p.delivered_time;
-                    rate_sample.is_app_limited = p.is_app_limited;
-                    rate_sample.send_elapsed = p.send_time - p.first_send_time;
-                    rate_sample.ack_elapsed = self.delivered_time - p.delivered_time;
-                    rate_sample.last_end_seq = packet_number;
                     self.first_send_time = p.send_time;
                     self.srtt = rate_sample.rtt;
                     self.packets.remove(p_index);
@@ -1071,20 +1078,30 @@ impl Controller for Bbr3 {
         }
 
         if let Some(mut rate_sample) = self.rs {
+            // eprintln!("rate_sample: {:?}", rate_sample);
             if rate_sample.prior_delivered == 0 {
+                eprintln!("prior delivered 0");
                 return;
             }
             rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
             rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
-            if rate_sample.interval < self.min_rtt {
+            // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
+            if rate_sample.interval < self.min_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
+                eprintln!("interval lower than min_rtt");
                 return;
             }
             if rate_sample.interval != Duration::ZERO {
                 rate_sample.delivery_rate =
                     rate_sample.delivered as f64 / rate_sample.interval.as_secs() as f64;
             }
+            if rate_sample.delivered >= self.cwnd {
+                self.is_cwnd_limited = true;
+            }
+            self.rs = Some(rate_sample);
             self.update_model_and_state(rate_sample.last_packet);
             self.update_control_parameters();
+            rate_sample.newly_acked = 0;
+            self.rs = Some(rate_sample);
         }
     }
 
