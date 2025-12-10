@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
+const PACKET_WINDOW: usize = 64;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum ProbeBwSubstate {
@@ -59,6 +60,8 @@ pub(super) struct BbrPacket {
     pub tx_in_flight: u64,
     pub end_seq: u64,
     pub lost: u64,
+    pub acknowledged: bool,
+    pub from_last_round: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -296,6 +299,7 @@ impl Bbr3 {
     fn probe_rtt_cwnd(&mut self) -> u64 {
         let mut probe_rtt_cwnd = self.bdp_multiple(self.probe_rtt_cwnd_gain);
         probe_rtt_cwnd = max(probe_rtt_cwnd, self.min_pipe_cwnd);
+        // eprintln!("setting cwnd from probe_rtt_cwnd: {:?}", probe_rtt_cwnd);
         probe_rtt_cwnd
     }
 
@@ -462,7 +466,7 @@ impl Bbr3 {
     }
 
     fn update_round(&mut self, packet: BbrPacket) {
-        eprintln!("packet delivered: {:?}, next_round_delivered: {:?}", packet.delivered, self.next_round_delivered);
+        // eprintln!("packet delivered: {:?}, next_round_delivered: {:?}", packet.delivered, self.next_round_delivered);
         if packet.delivered >= self.next_round_delivered {
             self.start_round();
             self.round_count += 1;
@@ -728,12 +732,14 @@ impl Bbr3 {
     fn update_max_bw(&mut self, p: BbrPacket) {
         self.update_round(p);
         if let Some(rate_sample) = self.rs {
+            // eprintln!("rate sample delivery rate: {:?}", rate_sample.delivery_rate);
             if rate_sample.delivery_rate > 0.0
                 && (rate_sample.delivery_rate >= self.max_bw || !rate_sample.is_app_limited)
             {
                 self.max_bw_filter
                     .update_max(self.cycle_count, rate_sample.delivery_rate.round() as u64);
                 self.max_bw = self.max_bw_filter.get() as f64;
+                // eprintln!("setting max_bw to {:?}", self.max_bw);
             }
         }
     }
@@ -775,19 +781,23 @@ impl Bbr3 {
     }
 
     fn check_full_bw_reached(&mut self) {
+        // eprintln!("checking full bw reached: full_bw_now {:?}; round_start {:?}", self.full_bw_now, self.round_start);
         if self.full_bw_now || !self.round_start {
             return;
         }
         if let Some(rate_sample) = self.rs {
             if rate_sample.is_app_limited {
+                // eprintln!("we're app limited");
                 return;
             }
             if rate_sample.delivery_rate >= self.full_bw * 1.25 {
                 self.reset_full_bw();
                 self.full_bw = rate_sample.delivery_rate;
+                // eprintln!("resetting full_bw to: {:?}", self.full_bw);
                 return;
             }
         }
+        // eprintln!("adding 1 to full_bw_count");
         self.full_bw_count += 1;
         self.full_bw_now = self.full_bw_count >= 3;
         if self.full_bw_now {
@@ -824,7 +834,7 @@ impl Bbr3 {
             if rate_sample.rtt >= Duration::from_secs(0)
                 && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired)
             {
-                self.probe_rtt_min_delay = self.rtt;
+                self.probe_rtt_min_delay = rate_sample.rtt;
                 self.probe_rtt_min_stamp = Some(Instant::now());
             }
         }
@@ -845,18 +855,19 @@ impl Bbr3 {
     }
 
     fn handle_probe_rtt(&mut self) {
+        // eprintln!("handling probe_rtt {:?}", self.probe_rtt_done_stamp.is_some());
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
-            eprintln!("setting probe_rtt_done_stamp");
+            // eprintln!("setting probe_rtt_done_stamp");
             self.probe_rtt_done_stamp = Some(Instant::now() + self.probe_rtt_duration);
             self.probe_rtt_round_done = false;
             self.start_round();
         } else if self.probe_rtt_done_stamp.is_some() {
             if self.round_start {
-                eprintln!("setting probe_rtt_round_done");
+                // eprintln!("setting probe_rtt_round_done");
                 self.probe_rtt_round_done = true;
             }
             if self.probe_rtt_round_done {
-                eprintln!("checking if probe_rtt_done");
+                // eprintln!("checking if probe_rtt_done");
                 self.check_probe_rtt_done();
             }
         }
@@ -892,7 +903,7 @@ impl Bbr3 {
     }
 
     fn update_model_and_state(&mut self, p: BbrPacket) {
-        // eprintln!("Updating model and state, current_state: {:?}", self.state);
+        eprintln!("Updating model and state, current_state: {:?}", self.state);
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
         self.update_ack_aggregation();
@@ -933,6 +944,7 @@ impl Bbr3 {
         cap = min(cap, self.inflight_shortterm);
         cap = max(cap, self.min_pipe_cwnd);
         self.cwnd = min(self.cwnd, cap);
+        // eprintln!("setting cwnd from bound_cwnd_for_model: {:?} ", self.cwnd);
     }
 
     fn set_cwnd(&mut self) {
@@ -949,6 +961,7 @@ impl Bbr3 {
             }
         }
         self.cwnd = max(self.cwnd, self.min_pipe_cwnd);
+        // eprintln!("setting cwnd from set_cwnd: {:?} ", self.cwnd);
         self.bound_cwnd_for_probe_rtt();
         self.bound_cwnd_for_model();
     }
@@ -970,6 +983,20 @@ impl Bbr3 {
         }
         false
     }
+
+    fn find_closest_packet_index(&self, packet_number: u64) -> Option<usize> {
+        if self.packets.is_empty() {
+            return None;
+        }
+        let p_insertion_index = self
+            .packets
+            .partition_point(|&p| &packet_number <= &p.end_seq);
+        if let Some(p_index) = p_insertion_index.checked_sub(1) {
+            Some(p_index)
+        } else {
+            Some(0usize)
+        }
+    }
 }
 impl Controller for Bbr3 {
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {
@@ -982,6 +1009,9 @@ impl Controller for Bbr3 {
             self.first_send_time = now;
             self.inflight += bytes;
         }
+        // eprintln!("sending packets with delivered: {:?}", self.delivered);
+        // eprintln!("sending for next_round_delivered: {:?}", self.next_round_delivered);
+        // eprintln!("pushing with packet number: {:?}", last_packet_number);
         self.packets.push_back(BbrPacket {
             delivered: self.delivered,
             delivered_time: self.delivered_time,
@@ -991,6 +1021,8 @@ impl Controller for Bbr3 {
             tx_in_flight: self.inflight,
             end_seq: last_packet_number,
             lost: self.lost,
+            acknowledged: false,
+            from_last_round: false,
         });
         self.handle_restart_from_idle(now);
     }
@@ -1004,24 +1036,29 @@ impl Controller for Bbr3 {
         _app_limited: bool,
         rtt: &RttEstimator,
     ) {
-        self.delivered += bytes;
-        self.delivered_time = now;
-        if let Some(mut rate_sample) = self.rs {
-            rate_sample.newly_acked += bytes;
-            rate_sample.rtt = rtt.get();
-            self.srtt = rate_sample.rtt;
-            self.rs = Some(rate_sample);
-        }
         if let Some(packet_number) = largest_acked {
-            let p_result = self
-                .packets
-                .binary_search_by_key(&packet_number, |&p| p.end_seq);
-            if let Ok(p_index) = p_result {
+            if let Some(mut rate_sample) = self.rs {
+                rate_sample.newly_acked += bytes;
+                rate_sample.rtt = rtt.get();
+                self.rs = Some(rate_sample);
+                self.delivered += bytes;
+                // eprintln!("Accumulating Acks with delivered: {:?}", self.delivered);
+                // eprintln!("Accumulating Acks with next_round_delivered: {:?}", self.next_round_delivered);
+                self.delivered_time = now;
+            }
+            // eprintln!("ACK packet looking for packet number: {:?}; with inflight: {:?}", packet_number, self.inflight);
+            // here packet numbers don't necessarily match one to one with what we've added so far
+            // so we get the closest packet number we have accumulated on send.
+            let p_index_option = self.find_closest_packet_index(packet_number);
+            if let Some(p_index) = p_index_option {
+                // eprintln!("p index: {:?}", p_index);
                 let p = self.packets[p_index];
-                self.update_round(p);
+                self.packets[p_index].acknowledged = true;
                 if let Some(mut rate_sample) = self.rs {
                     if self.is_newest_packet(sent, packet_number) {
+                        // eprintln!("ACK packet with delivered: {:?}", p.delivered);
                         // eprintln!("newest packet: {:?}", packet_number);
+                        self.srtt = rate_sample.rtt;
                         rate_sample.prior_delivered = p.delivered;
                         rate_sample.prior_time = p.delivered_time;
                         rate_sample.is_app_limited = p.is_app_limited;
@@ -1031,9 +1068,8 @@ impl Controller for Bbr3 {
                         rate_sample.last_end_seq = packet_number;
                         self.first_send_time = p.send_time;
                         rate_sample.last_packet = p;
-                        self.packets.remove(p_index);
+                        self.rs = Some(rate_sample);
                     }
-                    self.rs = Some(rate_sample);
                 } else {
                     let rate_sample = BbrRateSample {
                         rtt: rtt.get(),
@@ -1055,7 +1091,6 @@ impl Controller for Bbr3 {
                     self.rs = Some(rate_sample);
                     self.first_send_time = p.send_time;
                     self.srtt = rate_sample.rtt;
-                    self.packets.remove(p_index);
                 }
             }
         }
@@ -1072,36 +1107,46 @@ impl Controller for Bbr3 {
         if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
                 self.app_limited = largest_packet_num;
+            } else {
+                self.app_limited = 0;
+            }
+            if let Some(mut rate_sample) = self.rs {
+                // eprintln!("rate_sample: {:?}", rate_sample);
+                if rate_sample.prior_delivered == 0 {
+                    // eprintln!("prior delivered 0");
+                    return;
+                }
+                if rate_sample.newly_acked > 0 {
+                    rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
+                    rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
+                    // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
+                    if rate_sample.interval < self.min_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
+                        eprintln!("interval lower than min_rtt");
+                        return;
+                    }
+                    if rate_sample.interval != Duration::ZERO {
+                        rate_sample.delivery_rate =
+                            rate_sample.delivered as f64 / rate_sample.interval.as_secs_f64();
+                        eprintln!("delivery_rate: {:?}", rate_sample.delivery_rate);
+                    }
+                    if rate_sample.delivered >= self.cwnd {
+                        self.is_cwnd_limited = true;
+                    }
+                    self.rs = Some(rate_sample);
+                    self.packets.retain(|&p| !p.from_last_round);
+                    for p in self.packets.iter_mut() {
+                        if p.acknowledged {
+                            p.from_last_round = true;
+                        }
+                    }
+                    self.update_model_and_state(rate_sample.last_packet);
+                    self.update_control_parameters();
+                    rate_sample.newly_acked = 0;
+                    self.rs = Some(rate_sample);
+                }
             }
         } else if self.app_limited > 0 && self.delivered > self.app_limited {
             self.app_limited = 0;
-        }
-
-        if let Some(mut rate_sample) = self.rs {
-            // eprintln!("rate_sample: {:?}", rate_sample);
-            if rate_sample.prior_delivered == 0 {
-                eprintln!("prior delivered 0");
-                return;
-            }
-            rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
-            rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
-            // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
-            if rate_sample.interval < self.min_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
-                eprintln!("interval lower than min_rtt");
-                return;
-            }
-            if rate_sample.interval != Duration::ZERO {
-                rate_sample.delivery_rate =
-                    rate_sample.delivered as f64 / rate_sample.interval.as_secs() as f64;
-            }
-            if rate_sample.delivered >= self.cwnd {
-                self.is_cwnd_limited = true;
-            }
-            self.rs = Some(rate_sample);
-            self.update_model_and_state(rate_sample.last_packet);
-            self.update_control_parameters();
-            rate_sample.newly_acked = 0;
-            self.rs = Some(rate_sample);
         }
     }
 
@@ -1115,10 +1160,10 @@ impl Controller for Bbr3 {
         largest_lost: u64,
     ) {
         self.lost += lost_bytes;
-        let p_result = self
-            .packets
-            .binary_search_by_key(&largest_lost, |&p| p.end_seq);
-        if let Ok(p_index) = p_result {
+        let p_index_option = self
+            .find_closest_packet_index(largest_lost);
+
+        if let Some(p_index) = p_index_option {
             self.note_loss();
             let p = &self.packets[p_index];
             if !self.bw_probe_samples {
