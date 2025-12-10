@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
-const PACKET_WINDOW: usize = 64;
+const ROUND_COUNT_WINDOW: u64 = 10;
+
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum ProbeBwSubstate {
@@ -61,7 +62,8 @@ pub(super) struct BbrPacket {
     pub end_seq: u64,
     pub lost: u64,
     pub acknowledged: bool,
-    pub from_last_round: bool,
+    pub stale: bool,
+    pub round_count: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,7 +96,6 @@ pub struct Bbr3 {
     delivered: u64,
     inflight: u64,
     is_cwnd_limited: bool,
-    rtt: Duration,
     cycle_count: u64,
     cwnd: u64,
     pacing_rate: f64,
@@ -179,7 +180,6 @@ impl Bbr3 {
             delivered: 0,
             inflight: 0,
             is_cwnd_limited: false,
-            rtt: Duration::ZERO,
             cycle_count: 0,
             cwnd: initial_cwnd,
             pacing_rate: 2.773 * smss as f64,
@@ -849,7 +849,6 @@ impl Bbr3 {
 
         if self.probe_rtt_min_delay < self.min_rtt || min_rtt_expired {
             self.min_rtt = self.probe_rtt_min_delay;
-            //TODO calculate srtt (smoothed rtt)
             self.min_rtt_stamp = self.probe_rtt_min_stamp;
         }
     }
@@ -1022,7 +1021,8 @@ impl Controller for Bbr3 {
             end_seq: last_packet_number,
             lost: self.lost,
             acknowledged: false,
-            from_last_round: false,
+            stale: false,
+            round_count: self.round_count,
         });
         self.handle_restart_from_idle(now);
     }
@@ -1050,47 +1050,49 @@ impl Controller for Bbr3 {
             // here packet numbers don't necessarily match one to one with what we've added so far
             // so we get the closest packet number we have accumulated on send.
             let p_index_option = self.find_closest_packet_index(packet_number);
+            let is_newest_packet = self.is_newest_packet(sent, packet_number);
             if let Some(p_index) = p_index_option {
                 // eprintln!("p index: {:?}", p_index);
-                let p = self.packets[p_index];
-                self.packets[p_index].acknowledged = true;
-                if let Some(mut rate_sample) = self.rs {
-                    if self.is_newest_packet(sent, packet_number) {
-                        // eprintln!("ACK packet with delivered: {:?}", p.delivered);
-                        // eprintln!("newest packet: {:?}", packet_number);
-                        self.srtt = rate_sample.rtt;
-                        rate_sample.prior_delivered = p.delivered;
-                        rate_sample.prior_time = p.delivered_time;
-                        rate_sample.is_app_limited = p.is_app_limited;
-                        rate_sample.tx_in_flight = p.tx_in_flight;
-                        rate_sample.send_elapsed = p.send_time - p.first_send_time;
-                        rate_sample.ack_elapsed = self.delivered_time - p.delivered_time;
-                        rate_sample.last_end_seq = packet_number;
-                        self.first_send_time = p.send_time;
-                        rate_sample.last_packet = p;
+                if let Some(p) = self.packets.get_mut(p_index) {
+                    p.acknowledged = true;
+                    if let Some(mut rate_sample) = self.rs {
+                        if is_newest_packet {
+                            // eprintln!("ACK packet with delivered: {:?}", p.delivered);
+                            // eprintln!("newest packet: {:?}", packet_number);
+                            self.srtt = rate_sample.rtt;
+                            rate_sample.prior_delivered = p.delivered;
+                            rate_sample.prior_time = p.delivered_time;
+                            rate_sample.is_app_limited = p.is_app_limited;
+                            rate_sample.tx_in_flight = p.tx_in_flight;
+                            rate_sample.send_elapsed = p.send_time - p.first_send_time;
+                            rate_sample.ack_elapsed = self.delivered_time - p.delivered_time;
+                            rate_sample.last_end_seq = packet_number;
+                            self.first_send_time = p.send_time;
+                            rate_sample.last_packet = p.clone();
+                            self.rs = Some(rate_sample);
+                        }
+                    } else {
+                        let rate_sample = BbrRateSample {
+                            rtt: rtt.get(),
+                            prior_time: p.delivered_time,
+                            interval: Duration::ZERO,
+                            delivery_rate: 0.0,
+                            is_app_limited: p.is_app_limited,
+                            delivered: 0,
+                            prior_delivered: p.delivered,
+                            tx_in_flight: p.tx_in_flight,
+                            send_elapsed: p.send_time - p.first_send_time,
+                            ack_elapsed: self.delivered_time - p.delivered_time,
+                            newly_acked: bytes,
+                            newly_lost: 0,
+                            lost: 0,
+                            last_end_seq: packet_number,
+                            last_packet: p.clone(),
+                        };
                         self.rs = Some(rate_sample);
+                        self.first_send_time = p.send_time;
+                        self.srtt = rate_sample.rtt;
                     }
-                } else {
-                    let rate_sample = BbrRateSample {
-                        rtt: rtt.get(),
-                        prior_time: p.delivered_time,
-                        interval: Duration::ZERO,
-                        delivery_rate: 0.0,
-                        is_app_limited: p.is_app_limited,
-                        delivered: 0,
-                        prior_delivered: p.delivered,
-                        tx_in_flight: p.tx_in_flight,
-                        send_elapsed: p.send_time - p.first_send_time,
-                        ack_elapsed: self.delivered_time - p.delivered_time,
-                        newly_acked: bytes,
-                        newly_lost: 0,
-                        lost: 0,
-                        last_end_seq: packet_number,
-                        last_packet: p,
-                    };
-                    self.rs = Some(rate_sample);
-                    self.first_send_time = p.send_time;
-                    self.srtt = rate_sample.rtt;
                 }
             }
         }
@@ -1116,34 +1118,30 @@ impl Controller for Bbr3 {
                     // eprintln!("prior delivered 0");
                     return;
                 }
-                if rate_sample.newly_acked > 0 {
-                    rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
-                    rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
-                    // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
-                    if rate_sample.interval < self.min_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
-                        eprintln!("interval lower than min_rtt");
-                        return;
-                    }
-                    if rate_sample.interval != Duration::ZERO {
-                        rate_sample.delivery_rate =
-                            rate_sample.delivered as f64 / rate_sample.interval.as_secs_f64();
-                        eprintln!("delivery_rate: {:?}", rate_sample.delivery_rate);
-                    }
-                    if rate_sample.delivered >= self.cwnd {
-                        self.is_cwnd_limited = true;
-                    }
-                    self.rs = Some(rate_sample);
-                    self.packets.retain(|&p| !p.from_last_round);
-                    for p in self.packets.iter_mut() {
-                        if p.acknowledged {
-                            p.from_last_round = true;
-                        }
-                    }
-                    self.update_model_and_state(rate_sample.last_packet);
-                    self.update_control_parameters();
-                    rate_sample.newly_acked = 0;
-                    self.rs = Some(rate_sample);
+                rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
+                rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
+                // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
+                if rate_sample.interval < self.min_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
+                    return;
                 }
+                if rate_sample.interval != Duration::ZERO {
+                    rate_sample.delivery_rate =
+                        rate_sample.delivered as f64 / rate_sample.interval.as_secs_f64();
+                }
+                if rate_sample.delivered >= self.cwnd {
+                    self.is_cwnd_limited = true;
+                }
+                self.rs = Some(rate_sample);
+                self.packets.retain(|&p| !p.stale);
+                for p in self.packets.iter_mut() {
+                    if p.acknowledged || p.round_count > ROUND_COUNT_WINDOW {
+                        p.stale = true;
+                    }
+                }
+                self.update_model_and_state(rate_sample.last_packet);
+                self.update_control_parameters();
+                rate_sample.newly_acked = 0;
+                self.rs = Some(rate_sample);
             }
         } else if self.app_limited > 0 && self.delivered > self.app_limited {
             self.app_limited = 0;
