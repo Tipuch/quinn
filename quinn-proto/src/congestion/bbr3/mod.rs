@@ -301,7 +301,7 @@ impl Bbr3 {
     fn probe_rtt_cwnd(&mut self) -> u64 {
         let mut probe_rtt_cwnd = self.bdp_multiple(self.probe_rtt_cwnd_gain);
         probe_rtt_cwnd = max(probe_rtt_cwnd, self.min_pipe_cwnd);
-        println!("probe_rtt_cwnd: {:?}", probe_rtt_cwnd);
+        // println!("probe_rtt_cwnd: {:?}", probe_rtt_cwnd);
         probe_rtt_cwnd
     }
 
@@ -407,7 +407,7 @@ impl Bbr3 {
 
     // BBRIsTimeToGoDown in IETF spec
     fn maybe_go_down(&mut self) -> bool {
-        println!("is_cwnd_limited: {:?}", self.is_cwnd_limited);
+        // println!("is_cwnd_limited: {:?}", self.is_cwnd_limited);
         if self.is_cwnd_limited && self.cwnd >= self.inflight_longterm {
             self.reset_full_bw();
             if let Some(rate_sample) = self.rs {
@@ -526,9 +526,9 @@ impl Bbr3 {
         }
         if self.bw_probe_up_acks >= self.probe_up_cnt {
             let delta = self.bw_probe_up_acks / self.probe_up_cnt;
-            println!("###################");
-            println!("delta to increase inflight long term slope: {:?}", delta);
-            println!("###################");
+            // println!("###################");
+            // println!("delta to increase inflight long term slope: {:?}", delta);
+            // println!("###################");
             self.bw_probe_up_acks -= delta * self.probe_up_cnt;
             self.inflight_longterm += delta;
             if self.round_start {
@@ -899,7 +899,7 @@ impl Bbr3 {
     }
 
     fn update_model_and_state(&mut self, p: BbrPacket) {
-        println!("current state is: {:?}", self.state);
+        // println!("current state is: {:?}", self.state);
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
         self.update_ack_aggregation();
@@ -937,11 +937,11 @@ impl Bbr3 {
             }
             _ => {}
         }
-        println!("inflight_longterm: {:?}", self.inflight_longterm);
-        println!("inflight_shortterm: {:?}", self.inflight_shortterm);
+        // println!("inflight_longterm: {:?}", self.inflight_longterm);
+        // println!("inflight_shortterm: {:?}", self.inflight_shortterm);
         cap = min(cap, self.inflight_shortterm);
         cap = max(cap, self.min_pipe_cwnd);
-        println!("bound cwnd: {:?}", min(self.cwnd, cap));
+        // println!("bound cwnd: {:?}", min(self.cwnd, cap));
         self.cwnd = min(self.cwnd, cap);
     }
 
@@ -1101,7 +1101,7 @@ impl Controller for Bbr3 {
         largest_packet_num_acked: Option<u64>,
     ) {
         self.inflight = in_flight;
-        println!("inflight: {:?}", in_flight);
+        // println!("inflight: {:?}", in_flight);
         if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
                 self.app_limited = largest_packet_num;
@@ -1131,7 +1131,7 @@ impl Controller for Bbr3 {
                     self.is_cwnd_limited = true;
                 }
                 self.rs = Some(rate_sample);
-                println!("packets size: {}", self.packets.len());
+                // println!("packets size: {}", self.packets.len());
                 self.packets.retain(|&p| !p.stale);
                 for p in self.packets.iter_mut() {
                     if p.acknowledged || p.round_count > ROUND_COUNT_WINDOW {
