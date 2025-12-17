@@ -273,11 +273,14 @@ impl Bbr3 {
     fn inflight_at_loss(&mut self, lost_bytes: u64) -> u64 {
         let inflight_prev;
         if let Some(rate_sample) = self.rs {
-            inflight_prev = rate_sample.tx_in_flight - lost_bytes;
-            let lost_prev = rate_sample.lost - lost_bytes;
-            let lost_prefix =
-                (self.loss_thresh * (inflight_prev - lost_prev) as f64) / (1.0 - self.loss_thresh);
-            let inflight_at_loss = inflight_prev - lost_prefix as u64;
+            inflight_prev = rate_sample
+                .tx_in_flight
+                .checked_sub(lost_bytes)
+                .unwrap_or(0);
+            let lost_prev = rate_sample.lost.checked_sub(lost_bytes).unwrap_or(0);
+            let compared_loss = inflight_prev.checked_sub(lost_prev).unwrap_or(0);
+            let lost_prefix = (self.loss_thresh * compared_loss as f64) / (1.0 - self.loss_thresh);
+            let inflight_at_loss = inflight_prev.checked_sub(lost_prefix as u64).unwrap_or(0);
             return inflight_at_loss;
         }
         0
@@ -298,6 +301,7 @@ impl Bbr3 {
     fn probe_rtt_cwnd(&mut self) -> u64 {
         let mut probe_rtt_cwnd = self.bdp_multiple(self.probe_rtt_cwnd_gain);
         probe_rtt_cwnd = max(probe_rtt_cwnd, self.min_pipe_cwnd);
+        println!("probe_rtt_cwnd: {:?}", probe_rtt_cwnd);
         probe_rtt_cwnd
     }
 
@@ -403,6 +407,7 @@ impl Bbr3 {
 
     // BBRIsTimeToGoDown in IETF spec
     fn maybe_go_down(&mut self) -> bool {
+        println!("is_cwnd_limited: {:?}", self.is_cwnd_limited);
         if self.is_cwnd_limited && self.cwnd >= self.inflight_longterm {
             self.reset_full_bw();
             if let Some(rate_sample) = self.rs {
@@ -424,7 +429,7 @@ impl Bbr3 {
         if self.min_rtt == Duration::from_secs(u64::MAX) {
             return self.initial_cwnd;
         }
-        self.bdp = (self.bw * self.min_rtt.as_secs() as f64).round() as u64;
+        self.bdp = (self.bw * self.min_rtt.as_secs_f64()).round() as u64;
         (gain * self.bdp as f64) as u64
     }
 
@@ -507,7 +512,7 @@ impl Bbr3 {
     }
 
     fn raise_inflight_long_term_slope(&mut self) {
-        let growth_this_round = 2u64.pow(self.bw_probe_up_rounds as u32);
+        let growth_this_round = self.smss << self.bw_probe_up_rounds;
         self.bw_probe_up_rounds = min(self.bw_probe_up_rounds + 1, 30);
         self.probe_up_cnt = max(self.cwnd / growth_this_round, 1);
     }
@@ -521,6 +526,9 @@ impl Bbr3 {
         }
         if self.bw_probe_up_acks >= self.probe_up_cnt {
             let delta = self.bw_probe_up_acks / self.probe_up_cnt;
+            println!("###################");
+            println!("delta to increase inflight long term slope: {:?}", delta);
+            println!("###################");
             self.bw_probe_up_acks -= delta * self.probe_up_cnt;
             self.inflight_longterm += delta;
             if self.round_start {
@@ -754,7 +762,7 @@ impl Bbr3 {
         } else {
             interval = Duration::from_secs(0);
         }
-        let mut expected_delivered = (self.bw * interval.as_secs() as f64) as u64;
+        let mut expected_delivered = (self.bw * interval.as_secs_f64()) as u64;
         if self.extra_acked_delivered <= expected_delivered {
             self.extra_acked_delivered = 0;
             self.extra_acked_interval_start = Some(Instant::now());
@@ -764,7 +772,10 @@ impl Bbr3 {
             self.extra_acked_delivered += rate_sample.newly_acked;
         }
 
-        let mut extra = self.extra_acked_delivered - expected_delivered;
+        let mut extra = self
+            .extra_acked_delivered
+            .checked_sub(expected_delivered)
+            .unwrap_or(0);
         extra = min(extra, self.cwnd);
         if self.full_bw_reached {
             self.extra_acked_filter.update_max(self.round_count, extra);
@@ -888,7 +899,7 @@ impl Bbr3 {
     }
 
     fn update_model_and_state(&mut self, p: BbrPacket) {
-        // println!("current state is: {:?}", self.state);
+        println!("current state is: {:?}", self.state);
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
         self.update_ack_aggregation();
@@ -926,8 +937,11 @@ impl Bbr3 {
             }
             _ => {}
         }
+        println!("inflight_longterm: {:?}", self.inflight_longterm);
+        println!("inflight_shortterm: {:?}", self.inflight_shortterm);
         cap = min(cap, self.inflight_shortterm);
         cap = max(cap, self.min_pipe_cwnd);
+        println!("bound cwnd: {:?}", min(self.cwnd, cap));
         self.cwnd = min(self.cwnd, cap);
     }
 
@@ -976,7 +990,7 @@ impl Bbr3 {
         if let Some(mut rate_sample) = self.rs {
             rate_sample.newly_lost += lost_bytes;
             rate_sample.tx_in_flight = p.tx_in_flight;
-            rate_sample.lost = self.lost - p.lost;
+            rate_sample.lost = self.lost.checked_sub(p.lost).unwrap_or(0);
             rate_sample.is_app_limited = p.is_app_limited;
             if self.is_inflight_too_high() {
                 rate_sample.tx_in_flight = self.inflight_at_loss(lost_bytes);
@@ -1087,6 +1101,7 @@ impl Controller for Bbr3 {
         largest_packet_num_acked: Option<u64>,
     ) {
         self.inflight = in_flight;
+        println!("inflight: {:?}", in_flight);
         if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
                 self.app_limited = largest_packet_num;
@@ -1098,7 +1113,10 @@ impl Controller for Bbr3 {
                     return;
                 }
                 rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
-                rate_sample.delivered = self.delivered - rate_sample.prior_delivered;
+                rate_sample.delivered = self
+                    .delivered
+                    .checked_sub(rate_sample.prior_delivered)
+                    .unwrap_or(0);
                 // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
                 if rate_sample.interval < self.min_rtt
                     && self.min_rtt != Duration::from_secs(u64::MAX)
@@ -1113,6 +1131,7 @@ impl Controller for Bbr3 {
                     self.is_cwnd_limited = true;
                 }
                 self.rs = Some(rate_sample);
+                println!("packets size: {}", self.packets.len());
                 self.packets.retain(|&p| !p.stale);
                 for p in self.packets.iter_mut() {
                     if p.acknowledged || p.round_count > ROUND_COUNT_WINDOW {
