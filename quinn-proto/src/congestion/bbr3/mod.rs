@@ -1,6 +1,6 @@
 use crate::RttEstimator;
 use crate::congestion::bbr::min_max::MinMax;
-use crate::congestion::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, ControllerMetrics};
+use crate::congestion::{Controller, ControllerFactory, ControllerMetrics};
 use rand::Rng;
 use std::any::Any;
 use std::cmp::{max, min};
@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
 const ROUND_COUNT_WINDOW: u64 = 10;
+
+const MAX_DATAGRAM_SIZE: u64 = 65527;
+
+/// 1.2Mbps in bytes/sec
+const PACING_RATE_1_2MBPS: f64 = 1200.0 * 1000.0;
+
+/// 24Mbps in bytes/sec
+const PACING_RATE_24MBPS: f64 = 24000.0 * 1000.0;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum ProbeBwSubstate {
@@ -171,7 +179,7 @@ impl Bbr3 {
         // rfc9000 making sure maximum datagram size is between acceptable values
         // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
         let mut smss = max(1200, current_mtu) as u64;
-        smss = min(smss, 65527);
+        smss = min(smss, MAX_DATAGRAM_SIZE);
         let initial_cwnd = config.initial_window;
         Self {
             smss,
@@ -370,7 +378,7 @@ impl Bbr3 {
 
     fn has_elapsed_in_phase(&mut self, interval: Duration) -> bool {
         if let Some(cycle_stamp) = self.cycle_stamp {
-            Instant::now() > cycle_stamp + interval
+            Instant::now() > cycle_stamp.checked_add(interval).unwrap_or(cycle_stamp)
         } else {
             true
         }
@@ -388,6 +396,7 @@ impl Bbr3 {
 
     fn check_probe_rtt_done(&mut self) {
         if let Some(probe_rtt_done_stamp) = self.probe_rtt_done_stamp {
+            // println!("probe_rtt_done_stamp: {:?}", probe_rtt_done_stamp);
             if Instant::now() > probe_rtt_done_stamp {
                 self.probe_rtt_min_stamp = Some(Instant::now());
                 self.restore_cwnd();
@@ -434,7 +443,7 @@ impl Bbr3 {
     }
 
     fn update_offload_budget(&mut self) {
-        self.offload_budget = 3 * self.send_quantum;
+        self.offload_budget = self.send_quantum;
     }
 
     fn quantization_budget(&mut self, inflight_cap: u64) -> u64 {
@@ -706,6 +715,8 @@ impl Bbr3 {
     fn update_latest_delivery_signals(&mut self) {
         self.loss_round_start = false;
         if let Some(rate_sample) = self.rs {
+            // println!("delivery rate: {:?}", rate_sample.delivery_rate);
+            // println!("cwnd {:?} inflight {:?}", self.cwnd, self.inflight);
             self.bw_latest = [self.bw_latest, rate_sample.delivery_rate]
                 .iter()
                 .copied()
@@ -763,6 +774,8 @@ impl Bbr3 {
             interval = Duration::from_secs(0);
         }
         let mut expected_delivered = (self.bw * interval.as_secs_f64()) as u64;
+        // println!("expected delivered: {:?}", expected_delivered);
+        // println!("extra acked delivered: {:?}", self.extra_acked_delivered);
         if self.extra_acked_delivered <= expected_delivered {
             self.extra_acked_delivered = 0;
             self.extra_acked_interval_start = Some(Instant::now());
@@ -827,7 +840,10 @@ impl Bbr3 {
 
     fn update_min_rtt(&mut self) {
         if let Some(probe_rtt_min_stamp) = self.probe_rtt_min_stamp {
-            self.probe_rtt_expired = Instant::now() > probe_rtt_min_stamp + self.probe_rtt_interval;
+            self.probe_rtt_expired = Instant::now()
+                > probe_rtt_min_stamp
+                    .checked_add(self.probe_rtt_interval)
+                    .unwrap_or(probe_rtt_min_stamp);
         } else {
             self.probe_rtt_expired = true;
         }
@@ -842,12 +858,14 @@ impl Bbr3 {
 
         let min_rtt_expired;
         if let Some(min_rtt_stamp) = self.min_rtt_stamp {
-            min_rtt_expired =
-                Instant::now() > min_rtt_stamp + Duration::from_secs(self.min_rtt_filter_len);
+            min_rtt_expired = Instant::now()
+                > min_rtt_stamp
+                    .checked_add(Duration::from_secs(self.min_rtt_filter_len))
+                    .unwrap_or(min_rtt_stamp);
         } else {
             min_rtt_expired = true;
         }
-
+        // println!("min_rtt: {:?}", self.min_rtt.as_secs_f64());
         if self.probe_rtt_min_delay < self.min_rtt || min_rtt_expired {
             self.min_rtt = self.probe_rtt_min_delay;
             self.min_rtt_stamp = self.probe_rtt_min_stamp;
@@ -856,11 +874,18 @@ impl Bbr3 {
 
     fn handle_probe_rtt(&mut self) {
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
-            self.probe_rtt_done_stamp = Some(Instant::now() + self.probe_rtt_duration);
+            // println!("right meow. {:?}", Instant::now());
+            // println!("setting probe rtt done stamp to {:?}", Instant::now().checked_add(self.probe_rtt_duration).unwrap_or(Instant::now()));
+            self.probe_rtt_done_stamp = Some(
+                Instant::now()
+                    .checked_add(self.probe_rtt_duration)
+                    .unwrap_or(Instant::now()),
+            );
             self.probe_rtt_round_done = false;
             self.start_round();
         } else if self.probe_rtt_done_stamp.is_some() {
             if self.round_start {
+                // println!("setting probe rtt round done");
                 self.probe_rtt_round_done = true;
             }
             if self.probe_rtt_round_done {
@@ -918,9 +943,11 @@ impl Bbr3 {
     }
 
     fn set_send_quantum(&mut self) {
-        self.send_quantum = (self.pacing_rate * 0.001) as u64;
-        self.send_quantum = min(self.send_quantum, 64000);
-        self.send_quantum = max(self.send_quantum, 2 * self.smss);
+        self.send_quantum = match self.pacing_rate {
+            rate if rate < PACING_RATE_1_2MBPS => MAX_DATAGRAM_SIZE,
+            rate if rate < PACING_RATE_24MBPS => 2 * MAX_DATAGRAM_SIZE,
+            _ => min((self.pacing_rate / 1000.0) as u64, 64 * 1024),
+        };
     }
 
     fn bound_cwnd_for_model(&mut self) {
@@ -1066,6 +1093,8 @@ impl Controller for Bbr3 {
                         self.first_send_time = p.send_time;
                         rate_sample.last_packet = p.clone();
                         self.rs = Some(rate_sample);
+                        self.update_model_and_state(rate_sample.last_packet);
+                        self.update_control_parameters();
                     }
                 } else {
                     let rate_sample = BbrRateSample {
@@ -1088,6 +1117,8 @@ impl Controller for Bbr3 {
                     self.rs = Some(rate_sample);
                     self.first_send_time = p.send_time;
                     self.srtt = rate_sample.rtt;
+                    self.update_model_and_state(rate_sample.last_packet);
+                    self.update_control_parameters();
                 }
             }
         }
@@ -1138,8 +1169,6 @@ impl Controller for Bbr3 {
                         p.stale = true;
                     }
                 }
-                self.update_model_and_state(rate_sample.last_packet);
-                self.update_control_parameters();
                 rate_sample.newly_acked = 0;
                 self.rs = Some(rate_sample);
             }
@@ -1237,7 +1266,7 @@ impl Bbr3Config {
 impl Default for Bbr3Config {
     fn default() -> Self {
         Self {
-            initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
+            initial_window: 14720.clamp(2 * MAX_DATAGRAM_SIZE, 10 * MAX_DATAGRAM_SIZE),
         }
     }
 }
