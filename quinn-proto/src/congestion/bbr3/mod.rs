@@ -205,7 +205,7 @@ impl Bbr3 {
             loss_thresh: 0.02,
             beta: 0.7,
             headroom: 0.15,
-            min_pipe_cwnd: 4 * smss,
+            min_pipe_cwnd: 4 * MAX_DATAGRAM_SIZE,
             max_bw: 0.0,
             bw_shortterm: 0.0,
             bw: 0.0,
@@ -1132,7 +1132,10 @@ impl Controller for Bbr3 {
         largest_packet_num_acked: Option<u64>,
     ) {
         self.inflight = in_flight;
-        // println!("inflight: {:?}", in_flight);
+        println!("inflight: {:?}", in_flight);
+        println!("state: {:?}", self.state);
+        println!("cwnd: {:?}", self.cwnd);
+
         if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
                 self.app_limited = largest_packet_num;
@@ -1231,6 +1234,7 @@ impl Controller for Bbr3 {
             congestion_window: self.window(),
             ssthresh: Some(u64::MAX),
             pacing_rate: Some((self.pacing_rate * 8.0) as u64),
+            send_quantum: Some(self.send_quantum),
         }
     }
 

@@ -52,6 +52,7 @@ impl Pacer {
         mtu: u16,
         window: u64,
         now: Instant,
+        capacity: Option<u64>,
     ) -> Option<Instant> {
         debug_assert_ne!(
             window, 0,
@@ -59,7 +60,11 @@ impl Pacer {
         );
 
         if window != self.last_window || mtu != self.last_mtu {
-            self.capacity = optimal_capacity(smoothed_rtt, window, mtu);
+            if let Some(burst_size) = capacity {
+                self.capacity = burst_size;
+            } else {
+                self.capacity = optimal_capacity(smoothed_rtt, window, mtu);
+            }
 
             // Clamp the tokens
             self.tokens = self.capacity.min(self.tokens);
@@ -174,17 +179,24 @@ mod tests {
 
         assert!(
             Pacer::new(rtt, 30000, 1500, new_instant)
-                .delay(Duration::from_micros(0), 0, 1500, 1, old_instant)
+                .delay(Duration::from_micros(0), 0, 1500, 1, old_instant, None)
                 .is_none()
         );
         assert!(
             Pacer::new(rtt, 30000, 1500, new_instant)
-                .delay(Duration::from_micros(0), 1600, 1500, 1, old_instant)
+                .delay(Duration::from_micros(0), 1600, 1500, 1, old_instant, None)
                 .is_none()
         );
         assert!(
             Pacer::new(rtt, 30000, 1500, new_instant)
-                .delay(Duration::from_micros(0), 1500, 1500, 3000, old_instant)
+                .delay(
+                    Duration::from_micros(0),
+                    1500,
+                    1500,
+                    3000,
+                    old_instant,
+                    None
+                )
                 .is_none()
         );
     }
@@ -227,27 +239,27 @@ mod tests {
         assert_eq!(pacer.tokens, pacer.capacity);
         let initial_tokens = pacer.tokens;
 
-        pacer.delay(rtt, mtu as u64, mtu, window * 2, now);
+        pacer.delay(rtt, mtu as u64, mtu, window * 2, now, None);
         assert_eq!(
             pacer.capacity,
             (2 * window as u128 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
         );
         assert_eq!(pacer.tokens, initial_tokens);
 
-        pacer.delay(rtt, mtu as u64, mtu, window / 2, now);
+        pacer.delay(rtt, mtu as u64, mtu, window / 2, now, None);
         assert_eq!(
             pacer.capacity,
             (window as u128 / 2 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
         );
         assert_eq!(pacer.tokens, initial_tokens / 2);
 
-        pacer.delay(rtt, mtu as u64, mtu * 2, window, now);
+        pacer.delay(rtt, mtu as u64, mtu * 2, window, now, None);
         assert_eq!(
             pacer.capacity,
             (window as u128 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
         );
 
-        pacer.delay(rtt, mtu as u64, 20_000, window, now);
+        pacer.delay(rtt, mtu as u64, 20_000, window, now, None);
         assert_eq!(pacer.capacity, 20_000_u64 * MIN_BURST_SIZE);
     }
 
@@ -263,7 +275,7 @@ mod tests {
 
         for _ in 0..packet_capacity {
             assert_eq!(
-                pacer.delay(rtt, mtu as u64, mtu, window, old_instant),
+                pacer.delay(rtt, mtu as u64, mtu, window, old_instant, None),
                 None,
                 "When capacity is available packets should be sent immediately"
             );
@@ -274,7 +286,7 @@ mod tests {
         let pace_duration = Duration::from_nanos((TARGET_BURST_INTERVAL.as_nanos() * 4 / 5) as u64);
 
         let actual_delay = pacer
-            .delay(rtt, mtu as u64, mtu, window, old_instant)
+            .delay(rtt, mtu as u64, mtu, window, old_instant, None)
             .expect("Send must be delayed")
             .duration_since(old_instant);
 
@@ -292,7 +304,8 @@ mod tests {
                 mtu as u64,
                 mtu,
                 window,
-                old_instant + pace_duration / 2
+                old_instant + pace_duration / 2,
+                None,
             ),
             None
         );
@@ -300,7 +313,7 @@ mod tests {
 
         for _ in 0..packet_capacity / 2 {
             assert_eq!(
-                pacer.delay(rtt, mtu as u64, mtu, window, old_instant),
+                pacer.delay(rtt, mtu as u64, mtu, window, old_instant, None),
                 None,
                 "When capacity is available packets should be sent immediately"
             );
@@ -315,7 +328,8 @@ mod tests {
                 mtu as u64,
                 mtu,
                 window,
-                old_instant + pace_duration * 3 / 2
+                old_instant + pace_duration * 3 / 2,
+                None
             ),
             None
         );
