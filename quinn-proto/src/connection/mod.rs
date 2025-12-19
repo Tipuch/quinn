@@ -623,6 +623,7 @@ impl Connection {
                         self.path.congestion.window(),
                         now,
                         controller_metrics.send_quantum,
+                        controller_metrics.pacing_rate,
                     ) {
                         self.timers.set(Timer::Pacing, delay);
                         congestion_blocked = true;
@@ -1512,6 +1513,7 @@ impl Connection {
         self.path.congestion.on_end_acks(
             now,
             self.path.in_flight.bytes,
+            self.path.in_flight.ack_eliciting,
             self.app_limited,
             self.spaces[space].largest_acked_packet,
         );

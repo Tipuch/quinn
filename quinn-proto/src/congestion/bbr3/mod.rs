@@ -181,6 +181,7 @@ impl Bbr3 {
         let mut smss = max(1200, current_mtu) as u64;
         smss = min(smss, MAX_DATAGRAM_SIZE);
         let initial_cwnd = config.initial_window;
+        let nominal_bandwidth = initial_cwnd as f64 / 0.001;
         Self {
             smss,
             initial_cwnd,
@@ -189,7 +190,7 @@ impl Bbr3 {
             is_cwnd_limited: false,
             cycle_count: 0,
             cwnd: initial_cwnd,
-            pacing_rate: 2.773 * smss as f64,
+            pacing_rate: 2.773 * nominal_bandwidth,
             send_quantum: 2 * smss,
             pacing_gain: 2.773,
             startup_pacing_gain: 2.773,
@@ -309,7 +310,6 @@ impl Bbr3 {
     fn probe_rtt_cwnd(&mut self) -> u64 {
         let mut probe_rtt_cwnd = self.bdp_multiple(self.probe_rtt_cwnd_gain);
         probe_rtt_cwnd = max(probe_rtt_cwnd, self.min_pipe_cwnd);
-        // println!("probe_rtt_cwnd: {:?}", probe_rtt_cwnd);
         probe_rtt_cwnd
     }
 
@@ -396,7 +396,6 @@ impl Bbr3 {
 
     fn check_probe_rtt_done(&mut self) {
         if let Some(probe_rtt_done_stamp) = self.probe_rtt_done_stamp {
-            // println!("probe_rtt_done_stamp: {:?}", probe_rtt_done_stamp);
             if Instant::now() > probe_rtt_done_stamp {
                 self.probe_rtt_min_stamp = Some(Instant::now());
                 self.restore_cwnd();
@@ -416,7 +415,6 @@ impl Bbr3 {
 
     // BBRIsTimeToGoDown in IETF spec
     fn maybe_go_down(&mut self) -> bool {
-        // println!("is_cwnd_limited: {:?}", self.is_cwnd_limited);
         if self.is_cwnd_limited && self.cwnd >= self.inflight_longterm {
             self.reset_full_bw();
             if let Some(rate_sample) = self.rs {
@@ -535,9 +533,6 @@ impl Bbr3 {
         }
         if self.bw_probe_up_acks >= self.probe_up_cnt {
             let delta = self.bw_probe_up_acks / self.probe_up_cnt;
-            // println!("###################");
-            // println!("delta to increase inflight long term slope: {:?}", delta);
-            // println!("###################");
             self.bw_probe_up_acks -= delta * self.probe_up_cnt;
             self.inflight_longterm += delta;
             if self.round_start {
@@ -715,8 +710,6 @@ impl Bbr3 {
     fn update_latest_delivery_signals(&mut self) {
         self.loss_round_start = false;
         if let Some(rate_sample) = self.rs {
-            // println!("delivery rate: {:?}", rate_sample.delivery_rate);
-            // println!("cwnd {:?} inflight {:?}", self.cwnd, self.inflight);
             self.bw_latest = [self.bw_latest, rate_sample.delivery_rate]
                 .iter()
                 .copied()
@@ -774,8 +767,6 @@ impl Bbr3 {
             interval = Duration::from_secs(0);
         }
         let mut expected_delivered = (self.bw * interval.as_secs_f64()) as u64;
-        // println!("expected delivered: {:?}", expected_delivered);
-        // println!("extra acked delivered: {:?}", self.extra_acked_delivered);
         if self.extra_acked_delivered <= expected_delivered {
             self.extra_acked_delivered = 0;
             self.extra_acked_interval_start = Some(Instant::now());
@@ -865,7 +856,6 @@ impl Bbr3 {
         } else {
             min_rtt_expired = true;
         }
-        // println!("min_rtt: {:?}", self.min_rtt.as_secs_f64());
         if self.probe_rtt_min_delay < self.min_rtt || min_rtt_expired {
             self.min_rtt = self.probe_rtt_min_delay;
             self.min_rtt_stamp = self.probe_rtt_min_stamp;
@@ -874,8 +864,6 @@ impl Bbr3 {
 
     fn handle_probe_rtt(&mut self) {
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
-            // println!("right meow. {:?}", Instant::now());
-            // println!("setting probe rtt done stamp to {:?}", Instant::now().checked_add(self.probe_rtt_duration).unwrap_or(Instant::now()));
             self.probe_rtt_done_stamp = Some(
                 Instant::now()
                     .checked_add(self.probe_rtt_duration)
@@ -885,7 +873,6 @@ impl Bbr3 {
             self.start_round();
         } else if self.probe_rtt_done_stamp.is_some() {
             if self.round_start {
-                // println!("setting probe rtt round done");
                 self.probe_rtt_round_done = true;
             }
             if self.probe_rtt_round_done {
@@ -924,7 +911,6 @@ impl Bbr3 {
     }
 
     fn update_model_and_state(&mut self, p: BbrPacket) {
-        // println!("current state is: {:?}", self.state);
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
         self.update_ack_aggregation();
@@ -964,11 +950,8 @@ impl Bbr3 {
             }
             _ => {}
         }
-        // println!("inflight_longterm: {:?}", self.inflight_longterm);
-        // println!("inflight_shortterm: {:?}", self.inflight_shortterm);
         cap = min(cap, self.inflight_shortterm);
         cap = max(cap, self.min_pipe_cwnd);
-        // println!("bound cwnd: {:?}", min(self.cwnd, cap));
         self.cwnd = min(self.cwnd, cap);
     }
 
@@ -1127,14 +1110,12 @@ impl Controller for Bbr3 {
     fn on_end_acks(
         &mut self,
         _now: Instant,
-        in_flight: u64,
+        _in_flight: u64,
+        in_flight_ack_eliciting: u64,
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
     ) {
-        self.inflight = in_flight;
-        println!("inflight: {:?}", in_flight);
-        println!("state: {:?}", self.state);
-        println!("cwnd: {:?}", self.cwnd);
+        self.inflight = in_flight_ack_eliciting;
 
         if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
@@ -1165,7 +1146,6 @@ impl Controller for Bbr3 {
                     self.is_cwnd_limited = true;
                 }
                 self.rs = Some(rate_sample);
-                // println!("packets size: {}", self.packets.len());
                 self.packets.retain(|&p| !p.stale);
                 for p in self.packets.iter_mut() {
                     if p.acknowledged || p.round_count > ROUND_COUNT_WINDOW {
