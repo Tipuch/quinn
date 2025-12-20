@@ -52,10 +52,10 @@ pub(super) enum BbrState {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum AckPhase {
-    AcksProbeStarting,
-    AcksProbeStopping,
-    AcksRefilling,
-    AcksProbeFeedback,
+    ProbeStarting,
+    ProbeStopping,
+    Refilling,
+    ProbeFeedback,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -160,7 +160,7 @@ pub struct Bbr3 {
     rs: Option<BbrRateSample>,
     rounds_since_bw_probe: u64,
     bw_probe_wait: Duration,
-    bw_probe_up_rounds: u64,
+    bw_probe_up_rounds: u32,
     bw_probe_up_acks: u64,
     probe_up_cnt: u64,
     cycle_stamp: Option<Instant>,
@@ -249,7 +249,7 @@ impl Bbr3 {
             bw_probe_up_acks: 0,
             probe_up_cnt: 0,
             cycle_stamp: None,
-            ack_phase: AckPhase::AcksProbeStarting,
+            ack_phase: AckPhase::ProbeStarting,
             bw_probe_samples: false,
             loss_round_delivered: 0,
             loss_in_round: false,
@@ -282,14 +282,11 @@ impl Bbr3 {
     fn inflight_at_loss(&mut self, lost_bytes: u64) -> u64 {
         let inflight_prev;
         if let Some(rate_sample) = self.rs {
-            inflight_prev = rate_sample
-                .tx_in_flight
-                .checked_sub(lost_bytes)
-                .unwrap_or(0);
-            let lost_prev = rate_sample.lost.checked_sub(lost_bytes).unwrap_or(0);
-            let compared_loss = inflight_prev.checked_sub(lost_prev).unwrap_or(0);
+            inflight_prev = rate_sample.tx_in_flight.saturating_sub(lost_bytes);
+            let lost_prev = rate_sample.lost.saturating_sub(lost_bytes);
+            let compared_loss = inflight_prev.saturating_sub(lost_prev);
             let lost_prefix = (self.loss_thresh * compared_loss as f64) / (1.0 - self.loss_thresh);
-            let inflight_at_loss = inflight_prev.checked_sub(lost_prefix as u64).unwrap_or(0);
+            let inflight_at_loss = inflight_prev.saturating_sub(lost_prefix as u64);
             return inflight_at_loss;
         }
         0
@@ -491,7 +488,7 @@ impl Bbr3 {
         self.probe_up_cnt = u64::MAX;
         self.pick_probe_wait();
         self.cycle_stamp = Some(Instant::now());
-        self.ack_phase = AckPhase::AcksProbeStopping;
+        self.ack_phase = AckPhase::ProbeStopping;
         self.start_round();
         self.state = BbrState::ProbeBw(ProbeBwSubstate::Down);
     }
@@ -519,7 +516,10 @@ impl Bbr3 {
     }
 
     fn raise_inflight_long_term_slope(&mut self) {
-        let growth_this_round = self.smss << self.bw_probe_up_rounds;
+        let growth_this_round = self
+            .smss
+            .checked_shl(self.bw_probe_up_rounds)
+            .unwrap_or(u64::MAX);
         self.bw_probe_up_rounds = min(self.bw_probe_up_rounds + 1, 30);
         self.probe_up_cnt = max(self.cwnd / growth_this_round, 1);
     }
@@ -531,7 +531,7 @@ impl Bbr3 {
         if let Some(rate_sample) = self.rs {
             self.bw_probe_up_acks += rate_sample.newly_acked;
         }
-        if self.bw_probe_up_acks >= self.probe_up_cnt {
+        if self.bw_probe_up_acks >= self.probe_up_cnt && self.probe_up_cnt > 0 {
             let delta = self.bw_probe_up_acks / self.probe_up_cnt;
             self.bw_probe_up_acks -= delta * self.probe_up_cnt;
             self.inflight_longterm += delta;
@@ -546,21 +546,18 @@ impl Bbr3 {
     }
 
     fn adapt_long_term_model(&mut self) {
-        if self.ack_phase == AckPhase::AcksProbeStarting && self.round_start {
-            self.ack_phase = AckPhase::AcksProbeFeedback;
+        if self.ack_phase == AckPhase::ProbeStarting && self.round_start {
+            self.ack_phase = AckPhase::ProbeFeedback;
         }
-        if self.ack_phase == AckPhase::AcksProbeStopping && self.round_start {
-            match self.state {
-                BbrState::ProbeBw(_) => {
-                    if let Some(rate_sample) = self.rs {
-                        if !rate_sample.is_app_limited {
-                            self.advance_max_bw_filter();
-                        }
-                    } else {
+        if self.ack_phase == AckPhase::ProbeStopping && self.round_start {
+            if let BbrState::ProbeBw(_) = self.state {
+                if let Some(rate_sample) = self.rs {
+                    if !rate_sample.is_app_limited {
                         self.advance_max_bw_filter();
                     }
+                } else {
+                    self.advance_max_bw_filter();
                 }
-                _ => {}
             }
         }
         if !self.is_inflight_too_high() {
@@ -631,13 +628,13 @@ impl Bbr3 {
         self.reset_short_term_model();
         self.bw_probe_up_rounds = 0;
         self.bw_probe_up_acks = 0;
-        self.ack_phase = AckPhase::AcksRefilling;
+        self.ack_phase = AckPhase::Refilling;
         self.start_round();
         self.state = BbrState::ProbeBw(ProbeBwSubstate::Refill);
     }
 
     fn start_probe_bw_up(&mut self) {
-        self.ack_phase = AckPhase::AcksProbeStarting;
+        self.ack_phase = AckPhase::ProbeStarting;
         self.start_round();
         self.reset_full_bw();
         if let Some(rate_sample) = self.rs {
@@ -664,9 +661,7 @@ impl Bbr3 {
                 BbrState::ProbeRtt => {
                     self.check_probe_rtt_done();
                 }
-                _ => {
-                    return;
-                }
+                _ => {}
             }
         }
     }
@@ -685,11 +680,7 @@ impl Bbr3 {
                     self.start_probe_bw_cruise();
                 }
             }
-            BbrState::ProbeBw(ProbeBwSubstate::Cruise) => {
-                if self.maybe_enter_probe_bw_refill() {
-                    return;
-                }
-            }
+            BbrState::ProbeBw(ProbeBwSubstate::Cruise) => if self.maybe_enter_probe_bw_refill() {},
             BbrState::ProbeBw(ProbeBwSubstate::Refill) => {
                 if self.round_start {
                     self.bw_probe_samples = true;
@@ -701,9 +692,7 @@ impl Bbr3 {
                     self.start_probe_bw_down();
                 }
             }
-            _ => {
-                return;
-            }
+            _ => {}
         }
     }
 
@@ -725,9 +714,7 @@ impl Bbr3 {
 
     fn adapt_lower_bounds_from_congestion(&mut self) {
         match self.state {
-            BbrState::ProbeBw(_) => {
-                return;
-            }
+            BbrState::ProbeBw(_) => {}
             _ => {
                 if self.loss_in_round {
                     self.init_lower_bounds();
@@ -778,8 +765,7 @@ impl Bbr3 {
 
         let mut extra = self
             .extra_acked_delivered
-            .checked_sub(expected_delivered)
-            .unwrap_or(0);
+            .saturating_sub(expected_delivered);
         extra = min(extra, self.cwnd);
         if self.full_bw_reached {
             self.extra_acked_filter.update_max(self.round_count, extra);
@@ -891,7 +877,7 @@ impl Bbr3 {
                     self.enter_probe_rtt();
                     self.save_cwnd();
                     self.probe_rtt_done_stamp = None;
-                    self.ack_phase = AckPhase::AcksProbeStopping;
+                    self.ack_phase = AckPhase::ProbeStopping;
                     self.start_round();
                 }
             }
@@ -965,7 +951,7 @@ impl Bbr3 {
             }
         } else if self.cwnd < self.max_inflight || self.delivered < self.initial_cwnd {
             if let Some(rate_sample) = self.rs {
-                self.cwnd = self.cwnd + rate_sample.newly_acked;
+                self.cwnd += rate_sample.newly_acked;
             }
         }
         self.cwnd = max(self.cwnd, self.min_pipe_cwnd);
@@ -1000,7 +986,7 @@ impl Bbr3 {
         if let Some(mut rate_sample) = self.rs {
             rate_sample.newly_lost += lost_bytes;
             rate_sample.tx_in_flight = p.tx_in_flight;
-            rate_sample.lost = self.lost.checked_sub(p.lost).unwrap_or(0);
+            rate_sample.lost = self.lost.saturating_sub(p.lost);
             rate_sample.is_app_limited = p.is_app_limited;
             if self.is_inflight_too_high() {
                 rate_sample.tx_in_flight = self.inflight_at_loss(lost_bytes);
@@ -1074,7 +1060,7 @@ impl Controller for Bbr3 {
                         rate_sample.ack_elapsed = self.delivered_time - p.delivered_time;
                         rate_sample.last_end_seq = packet_number;
                         self.first_send_time = p.send_time;
-                        rate_sample.last_packet = p.clone();
+                        rate_sample.last_packet = *p;
                         self.rs = Some(rate_sample);
                         self.update_model_and_state(rate_sample.last_packet);
                         self.update_control_parameters();
@@ -1095,7 +1081,7 @@ impl Controller for Bbr3 {
                         newly_lost: 0,
                         lost: 0,
                         last_end_seq: packet_number,
-                        last_packet: p.clone(),
+                        last_packet: *p,
                     };
                     self.rs = Some(rate_sample);
                     self.first_send_time = p.send_time;
@@ -1128,10 +1114,7 @@ impl Controller for Bbr3 {
                     return;
                 }
                 rate_sample.interval = max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
-                rate_sample.delivered = self
-                    .delivered
-                    .checked_sub(rate_sample.prior_delivered)
-                    .unwrap_or(0);
+                rate_sample.delivered = self.delivered.saturating_sub(rate_sample.prior_delivered);
                 // ignore this condition on an initially high min rtt as per https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
                 if rate_sample.interval < self.min_rtt
                     && self.min_rtt != Duration::from_secs(u64::MAX)

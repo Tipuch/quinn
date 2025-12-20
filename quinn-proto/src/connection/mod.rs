@@ -1663,7 +1663,7 @@ impl Connection {
         self.path.congestion.on_packet_acked(
             now,
             info.time_sent,
-            info.size.into(),
+            info.size,
             pn,
             self.app_limited,
             &self.path.rtt,
@@ -1825,7 +1825,7 @@ impl Connection {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
                 self.path
                     .congestion
-                    .on_packet_lost(now, info.time_sent, info.size, packet.clone());
+                    .on_packet_lost(now, info.time_sent, info.size, packet);
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,

@@ -111,10 +111,7 @@ impl Pacer {
         }
 
         if let Some(pacing_rate) = pacing_rate {
-            let next_bytes = bytes_to_send
-                .max(self.capacity)
-                .checked_sub(self.tokens)
-                .unwrap_or(0);
+            let next_bytes = bytes_to_send.max(self.capacity).saturating_sub(self.tokens);
             if pacing_rate == 0 {
                 return None;
             }
