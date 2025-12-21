@@ -228,6 +228,32 @@ mod tests {
                 )
                 .is_none()
         );
+        assert!(
+            Pacer::new(rtt, 30000, 1500, new_instant)
+                .delay(
+                    Duration::from_micros(0),
+                    1500,
+                    1500,
+                    3000,
+                    old_instant,
+                    Some(20000),
+                    None
+                )
+                .is_none()
+        );
+        assert!(
+            Pacer::new(rtt, 30000, 1500, new_instant)
+                .delay(
+                    Duration::from_micros(0),
+                    1500,
+                    1500,
+                    3000,
+                    old_instant,
+                    Some(20000),
+                    Some(1600000000) //200 MB/s in bits/s
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -365,5 +391,32 @@ mod tests {
             None
         );
         assert_eq!(pacer.tokens, pacer.capacity);
+    }
+
+    #[test]
+    fn adjusts_capacity_from_congestion() {
+        let window = 2_000_000;
+        let mtu = 1500;
+        let rtt = Duration::from_millis(50);
+        let now = Instant::now();
+        let send_quantum = Some(20000);
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
+        pacer.delay(rtt, mtu as u64, mtu, window * 2, now, send_quantum, None);
+        assert_eq!(pacer.capacity, 20000);
+    }
+
+    #[test]
+    fn adjusts_pacing_from_congestion_metrics() {
+        let window = 2_000_000;
+        let mtu = 1500;
+        let rtt = Duration::from_millis(50);
+        let now = Instant::now();
+        let send_quantum = Some(20000);
+        let pacing_rate = Some(1600000000); //200 MB/s in bits/s
+        let mut pacer = Pacer::new(rtt, window, mtu, now);
+        assert_eq!(
+            pacer.delay(rtt, 40000, mtu, window, now, send_quantum, pacing_rate),
+            Some(now + Duration::from_micros(100))
+        )
     }
 }
