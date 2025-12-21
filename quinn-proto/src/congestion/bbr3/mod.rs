@@ -1,12 +1,12 @@
 use crate::RttEstimator;
 use crate::congestion::bbr::min_max::MinMax;
 use crate::congestion::{Controller, ControllerFactory, ControllerMetrics};
+use crate::{Duration, Instant};
 use rand::Rng;
 use std::any::Any;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 const MAX_BW_FILTER_LEN: usize = 2;
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
