@@ -95,7 +95,7 @@ pub(super) struct BbrRateSample {
 /// Experimental! Use at your own risk.
 ///
 /// Aims for reduced buffer bloat and improved performance over high bandwidth-delay product networks.
-/// Based on https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
+/// Based on <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt>
 #[derive(Debug, Clone)]
 pub struct Bbr3 {
     smss: u64,
