@@ -98,6 +98,7 @@ pub trait Controller: Send + Sync {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: None,
+            send_quantum: None,
         }
     }
 
@@ -119,8 +120,10 @@ pub struct ControllerMetrics {
     pub congestion_window: u64,
     /// Slow start threshold (bytes)
     pub ssthresh: Option<u64>,
-    /// Pacing rate (bits/s)
+    /// Pacing rate (bytes/s)
     pub pacing_rate: Option<u64>,
+    /// Send Quantum (bytes) used to control the size of packet bursts
+    pub send_quantum: Option<u64>,
 }
 
 /// Constructs controllers on demand
