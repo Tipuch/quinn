@@ -1513,6 +1513,7 @@ impl Connection {
         self.path.congestion.on_end_acks(
             now,
             self.path.in_flight.bytes,
+            self.path.in_flight.ack_eliciting,
             self.app_limited,
             self.spaces[space].largest_acked_packet,
         );
@@ -1549,8 +1550,18 @@ impl Connection {
                 // of newly acked packets that remains well-defined in the presence of arbitrary packet
                 // reordering.
                 if new_largest {
-                    let sent = self.spaces[space].largest_acked_packet_sent;
-                    self.process_ecn(now, space, newly_acked.len() as u64, ecn, sent);
+                    let packet_space = &self.spaces[space];
+                    let sent = packet_space.largest_acked_packet_sent;
+                    if let Some(largest_sent) = packet_space.largest_acked_packet {
+                        self.process_ecn(
+                            now,
+                            space,
+                            newly_acked.len() as u64,
+                            ecn,
+                            sent,
+                            largest_sent,
+                        );
+                    }
                 }
             } else {
                 // We always start out sending ECN, so any ack that doesn't acknowledge it disables it.
@@ -1608,6 +1619,7 @@ impl Connection {
         newly_acked: u64,
         ecn: frame::EcnCounts,
         largest_sent_time: Instant,
+        largest_sent: u64,
     ) {
         match self.spaces[space].detect_ecn(newly_acked, ecn) {
             Err(e) => {
@@ -1620,9 +1632,14 @@ impl Connection {
             Ok(false) => {}
             Ok(true) => {
                 self.stats.path.congestion_events += 1;
-                self.path
-                    .congestion
-                    .on_congestion_event(now, largest_sent_time, false, true, 0);
+                self.path.congestion.on_congestion_event(
+                    now,
+                    largest_sent_time,
+                    false,
+                    true,
+                    0,
+                    largest_sent,
+                );
             }
         }
     }
@@ -1846,6 +1863,7 @@ impl Connection {
                     in_persistent_congestion,
                     false,
                     size_of_lost_packets,
+                    largest_lost,
                 );
             }
         }

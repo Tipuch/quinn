@@ -56,6 +56,7 @@ pub trait Controller: Send + Sync {
         &mut self,
         now: Instant,
         in_flight: u64,
+        in_flight_ack_eliciting: u64,
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
     ) {
@@ -74,6 +75,7 @@ pub trait Controller: Send + Sync {
         is_persistent_congestion: bool,
         is_ecn: bool,
         lost_bytes: u64,
+        largest_lost: u64,
     );
 
     /// One packet was just lost
