@@ -1,13 +1,13 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+use crate::{CommonOpt, PERF_CIPHER_SUITES, noprotection::NoProtectionServerConfig};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use quinn::{TokioRuntime, crypto::rustls::QuicServerConfig};
+use quinn_proto::congestion::Bbr3Config;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
 use tracing::{debug, error, info};
-
-use crate::{CommonOpt, PERF_CIPHER_SUITES, noprotection::NoProtectionServerConfig};
 
 #[derive(Parser)]
 #[clap(name = "server")]
@@ -62,7 +62,7 @@ pub async fn run(opt: Opt) -> Result<()> {
         crypto.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
-    let transport = opt.common.build_transport_config(
+    let mut transport = opt.common.build_transport_config(
         #[cfg(feature = "qlog")]
         "perf-server",
     )?;
@@ -72,6 +72,7 @@ pub async fn run(opt: Opt) -> Result<()> {
         true => Arc::new(NoProtectionServerConfig::new(crypto)),
         false => crypto,
     });
+    // transport.congestion_controller_factory(Arc::new(Bbr3Config::default()));
     config.transport_config(Arc::new(transport));
 
     let socket = opt.common.bind_socket(opt.listen)?;

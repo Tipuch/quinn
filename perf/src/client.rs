@@ -6,20 +6,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
-use bytes::Bytes;
-use clap::Parser;
-use quinn::{TokioRuntime, crypto::rustls::QuicClientConfig};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio::sync::Semaphore;
-use tracing::{debug, error, info};
-
 use crate::{
     CommonOpt, PERF_CIPHER_SUITES,
     noprotection::NoProtectionClientConfig,
     parse_byte_size,
     stats::{OpenStreamStats, Stats},
 };
+use anyhow::{Context, Result};
+use bytes::Bytes;
+use clap::Parser;
+use quinn::{TokioRuntime, crypto::rustls::QuicClientConfig};
+use quinn_proto::congestion::Bbr3Config;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio::sync::Semaphore;
+use tracing::{debug, error, info};
 
 /// Connects to a QUIC perf server and maintains a specified pattern of requests until interrupted
 #[derive(Parser)]
@@ -121,10 +121,11 @@ pub async fn run(opt: Opt) -> Result<()> {
         crypto.key_log = Arc::new(rustls::KeyLogFile::new());
     }
 
-    let transport = opt.common.build_transport_config(
+    let mut transport = opt.common.build_transport_config(
         #[cfg(feature = "qlog")]
         "perf-client",
     )?;
+    // transport.congestion_controller_factory(Arc::new(Bbr3Config::default()));
 
     let crypto = Arc::new(QuicClientConfig::try_from(crypto)?);
     let mut config = quinn::ClientConfig::new(match opt.common.no_protection {

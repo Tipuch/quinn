@@ -2,6 +2,14 @@
 //!
 //! Checkout the `README.md` for guidance.
 
+use anyhow::{Context, Result, anyhow, bail};
+use clap::Parser;
+use proto::QlogConfig;
+use proto::congestion::Bbr3Config;
+use proto::crypto::rustls::QuicServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
+use std::fs::File;
+use std::io::BufWriter;
 use std::{
     ascii, fs, io,
     net::SocketAddr,
@@ -9,11 +17,6 @@ use std::{
     str,
     sync::Arc,
 };
-
-use anyhow::{Context, Result, anyhow, bail};
-use clap::Parser;
-use proto::crypto::rustls::QuicServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument as _;
 
@@ -131,6 +134,21 @@ async fn run(options: Opt) -> Result<()> {
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
     transport_config.max_concurrent_uni_streams(0_u8.into());
+
+    // qlog
+    #[cfg(feature = "qlog")]
+    let qlog_file = Some(PathBuf::from(r"./testbbr3.qlog"));
+    if let Some(qlog_file) = qlog_file {
+        let mut qlog = QlogConfig::default();
+        let file = File::create(qlog_file)?;
+        let writer = BufWriter::new(file);
+        qlog.writer(Box::new(writer))
+            .title(Some("bbr-server".into()));
+        transport_config.qlog_stream(qlog.into_stream());
+    }
+
+    // transport_config.congestion_controller_factory(Arc::new(Bbr3Config::default()));
+    // Cubic by default.
 
     let root = Arc::<Path>::from(options.root.clone());
     if !root.exists() {

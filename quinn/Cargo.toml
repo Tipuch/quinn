@@ -89,11 +89,11 @@ cfg_aliases = { workspace = true }
 
 [[example]]
 name = "server"
-required-features = ["rustls-ring"]
+required-features = ["rustls-ring", "qlog"]
 
 [[example]]
 name = "client"
-required-features = ["rustls-ring"]
+required-features = ["rustls-ring", "qlog"]
 
 [[example]]
 name = "insecure_connection"
