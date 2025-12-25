@@ -19,6 +19,10 @@ pub trait Controller: Send + Sync {
     #[allow(unused_variables)]
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {}
 
+    /// One packet was just sent
+    #[allow(unused_variables)]
+    fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet_number: u64) {}
+
     /// Packet deliveries were confirmed
     ///
     /// `app_limited` indicates whether the connection was blocked on outgoing
@@ -30,6 +34,18 @@ pub trait Controller: Send + Sync {
         sent: Instant,
         bytes: u64,
         app_limited: bool,
+        rtt: &RttEstimator,
+    ) {
+    }
+
+    /// One packet was just acked
+    #[allow(unused_variables)]
+    fn on_packet_acked(
+        &mut self,
+        now: Instant,
+        sent: Instant,
+        bytes: u16,
+        packet_number: u64,
         rtt: &RttEstimator,
     ) {
     }
@@ -59,6 +75,10 @@ pub trait Controller: Send + Sync {
         is_ecn: bool,
         lost_bytes: u64,
     );
+
+    /// One packet was just lost
+    #[allow(unused_variables)]
+    fn on_packet_lost(&mut self, lost_bytes: u16, packet_number: u64) {}
 
     /// Packets were incorrectly deemed lost
     ///
