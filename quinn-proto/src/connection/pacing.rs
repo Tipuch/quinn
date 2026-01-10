@@ -45,6 +45,13 @@ impl Pacer {
     ///
     /// The 5/4 ratio used here comes from the suggestion that N = 1.25 in the draft IETF RFC for
     /// QUIC.
+    /// `capacity` in bytes is used to cap the number of bytes sent at once.
+    /// It can be leveraged in congestion control to regulate the maximum size of transmission aggregates.
+    /// e.g: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#name-send-quantum-csend_quantum>
+    ///
+    /// `pacing_rate` in bytes/sec is used to pace the connection and control the upper limit of how fast
+    /// we're sending data it can be leveraged in congestion control
+    /// e.g: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#name-pacing-rate-cpacing_rate>
     pub(super) fn delay(
         &mut self,
         smoothed_rtt: Duration,
@@ -63,14 +70,14 @@ impl Pacer {
         if window != self.last_window || mtu != self.last_mtu {
             self.capacity = optimal_capacity(smoothed_rtt, window, mtu);
 
-            // Clamp the tokens
+            // here we cap the number of bytes sent at once during a burst
             self.tokens = self.capacity.min(self.tokens);
             self.last_window = window;
             self.last_mtu = mtu;
         }
 
-        if let Some(burst_size) = capacity {
-            self.capacity = burst_size;
+        if let Some(capacity) = capacity {
+            self.capacity = capacity;
             self.tokens = self.capacity.min(self.tokens);
         }
 
@@ -111,12 +118,8 @@ impl Pacer {
         }
 
         if let Some(pacing_rate) = pacing_rate {
-            let next_bytes = bytes_to_send.max(self.capacity).saturating_sub(self.tokens);
-            if pacing_rate == 0 {
-                return None;
-            }
-            let delay_ms = (next_bytes as f64 / pacing_rate as f64) * 1000.0;
-            let delay = Duration::from_micros((delay_ms * 1000.0).round() as u64);
+            let capped_bytes_to_send = bytes_to_send.max(self.capacity);
+            let delay = Duration::from_secs_f64(capped_bytes_to_send as f64 / pacing_rate as f64);
             return Some(now + delay);
         }
 
@@ -414,9 +417,10 @@ mod tests {
         let send_quantum = Some(20000);
         let pacing_rate = Some(200_000_000); //200 MB/s in bytes/s
         let mut pacer = Pacer::new(rtt, window, mtu, now);
+        // 40_000 B / 200_000_000 MB/s = 0.0002 sec = 200 microseconds
         assert_eq!(
             pacer.delay(rtt, 40000, mtu, window, now, send_quantum, pacing_rate),
-            Some(now + Duration::from_micros(100))
+            Some(now + Duration::from_micros(200))
         )
     }
 }
