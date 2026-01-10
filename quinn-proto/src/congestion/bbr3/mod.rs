@@ -1,7 +1,7 @@
-mod min_max;
+mod max_filter;
 
 use crate::RttEstimator;
-use crate::congestion::bbr3::min_max::MinMax;
+use crate::congestion::bbr3::max_filter::MaxFilter;
 use crate::congestion::{Controller, ControllerFactory, ControllerMetrics};
 use crate::{Duration, Instant};
 use rand::{Rng, SeedableRng};
@@ -98,7 +98,7 @@ struct BbrRateSample {
 /// Experimental! Use at your own risk.
 ///
 /// Aims for reduced buffer bloat and improved performance over high bandwidth-delay product networks.
-/// Based on <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt>
+/// Based on <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html>
 #[derive(Debug, Clone)]
 pub struct Bbr3 {
     smss: u64,
@@ -143,10 +143,10 @@ pub struct Bbr3 {
     inflight_shortterm: u64,
     bw_latest: f64,
     inflight_latest: u64,
-    max_bw_filter: MinMax,
+    max_bw_filter: MaxFilter,
     extra_acked_interval_start: Option<Instant>,
     extra_acked_delivered: u64,
-    extra_acked_filter: MinMax,
+    extra_acked_filter: MaxFilter,
     full_bw_reached: bool,
     full_bw_now: bool,
     full_bw: f64,
@@ -230,10 +230,10 @@ impl Bbr3 {
             inflight_shortterm: 0,
             bw_latest: 0.0,
             inflight_latest: 0,
-            max_bw_filter: MinMax::new(MAX_BW_FILTER_LEN as u64),
+            max_bw_filter: MaxFilter::new(MAX_BW_FILTER_LEN as u64),
             extra_acked_interval_start: None,
             extra_acked_delivered: 0,
-            extra_acked_filter: MinMax::new(EXTRA_ACKED_FILTER_LEN as u64),
+            extra_acked_filter: MaxFilter::new(EXTRA_ACKED_FILTER_LEN as u64),
             full_bw_reached: false,
             full_bw_now: false,
             full_bw: 0.0,
@@ -759,7 +759,7 @@ impl Bbr3 {
             {
                 self.max_bw_filter
                     .update_max(self.cycle_count, rate_sample.delivery_rate.round() as u64);
-                self.max_bw = self.max_bw_filter.get() as f64;
+                self.max_bw = self.max_bw_filter.get_max() as f64;
             }
         }
     }
@@ -796,7 +796,7 @@ impl Bbr3 {
         extra = min(extra, self.cwnd);
         if self.full_bw_reached {
             self.extra_acked_filter.update_max(self.round_count, extra);
-            self.extra_acked = self.extra_acked_filter.get();
+            self.extra_acked = self.extra_acked_filter.get_max();
         } else {
             self.extra_acked = extra; // In startup, just remember 1 round
         }
