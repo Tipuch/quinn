@@ -4,7 +4,8 @@ use crate::RttEstimator;
 use crate::congestion::bbr3::min_max::MinMax;
 use crate::congestion::{Controller, ControllerFactory, ControllerMetrics};
 use crate::{Duration, Instant};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand_pcg::Pcg32;
 use std::any::Any;
 use std::cmp::{max, min};
 use std::collections::VecDeque;
@@ -118,6 +119,7 @@ pub struct Bbr3 {
     pacing_margin_percent: f64,
     cwnd_gain: f64,
     default_cwnd_gain: f64,
+    probe_rng_seed: Option<u64>,
     probe_up_cwnd_gain: f64,
     probe_rtt_cwnd_gain: f64,
     state: BbrState,
@@ -205,6 +207,7 @@ impl Bbr3 {
             pacing_margin_percent: 1.0,
             cwnd_gain: 2.0,
             default_cwnd_gain: 2.0,
+            probe_rng_seed: config.probe_rng_seed,
             probe_up_cwnd_gain: 2.25,
             state: BbrState::Startup,
             round_count: 0,
@@ -374,7 +377,12 @@ impl Bbr3 {
     }
 
     fn pick_probe_wait(&mut self) {
-        let mut rng = rand::rng();
+        let mut rng: Pcg32;
+        if let Some(probe_seed) = self.probe_rng_seed {
+            rng = Pcg32::seed_from_u64(probe_seed);
+        } else {
+            rng = Pcg32::from_os_rng();
+        }
         // 0 or 1
         self.rounds_since_bw_probe = rng.random_bool(0.5) as u64;
         self.bw_probe_wait = Duration::from_millis(2000 + rng.random_range(0..=1000));
@@ -1191,9 +1199,7 @@ impl Controller for Bbr3 {
     }
 
     fn on_mtu_update(&mut self, new_mtu: u16) {
-        let mut smss = max(1200, new_mtu) as u64;
-        smss = min(smss, 65527);
-        self.smss = smss;
+        self.smss = min(max(1200, new_mtu) as u64, 65527);
         self.set_cwnd();
     }
 
@@ -1227,6 +1233,7 @@ impl Controller for Bbr3 {
 #[derive(Debug, Clone)]
 pub struct Bbr3Config {
     initial_window: u64,
+    probe_rng_seed: Option<u64>,
 }
 
 impl Bbr3Config {
@@ -1243,6 +1250,7 @@ impl Default for Bbr3Config {
     fn default() -> Self {
         Self {
             initial_window: 14720.clamp(2 * MAX_DATAGRAM_SIZE, 10 * MAX_DATAGRAM_SIZE),
+            probe_rng_seed: None,
         }
     }
 }
