@@ -24,7 +24,7 @@ const PACING_RATE_1_2MBPS: f64 = 1200.0 * 1000.0;
 const PACING_RATE_24MBPS: f64 = 24000.0 * 1000.0;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum ProbeBwSubstate {
+enum ProbeBwSubstate {
     /// Deceleration: sends slower than delivery rate to reduce queue
     Down,
 
@@ -39,7 +39,7 @@ pub(super) enum ProbeBwSubstate {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum BbrState {
+enum BbrState {
     /// Initial state: rapidly probes for bandwidth using high pacing_gain
     Startup,
 
@@ -54,7 +54,7 @@ pub(super) enum BbrState {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum AckPhase {
+enum AckPhase {
     ProbeStarting,
     ProbeStopping,
     Refilling,
@@ -62,7 +62,7 @@ pub(super) enum AckPhase {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct BbrPacket {
+struct BbrPacket {
     pub delivered: u64,
     pub delivered_time: Instant,
     pub first_send_time: Instant,
@@ -77,7 +77,7 @@ pub(super) struct BbrPacket {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct BbrRateSample {
+struct BbrRateSample {
     pub delivery_rate: f64,
     pub is_app_limited: bool,
     pub interval: Duration,
@@ -182,7 +182,7 @@ pub struct Bbr3 {
 }
 
 impl Bbr3 {
-    pub(super) fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
+    fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
         // rfc9000 making sure maximum datagram size is between acceptable values
         // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
         let smss = min(max(1200, current_mtu) as u64, MAX_DATAGRAM_SIZE);
