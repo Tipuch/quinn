@@ -1817,7 +1817,7 @@ impl Connection {
 
             for &packet in &lost_packets {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
-                self.path.congestion.on_packet_lost(info.size, packet);
+                self.path.congestion.on_packet_lost(info.size, packet, now);
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,

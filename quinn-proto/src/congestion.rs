@@ -80,7 +80,7 @@ pub trait Controller: Send + Sync {
 
     /// One packet was just lost
     #[allow(unused_variables)]
-    fn on_packet_lost(&mut self, lost_bytes: u16, packet_number: u64) {}
+    fn on_packet_lost(&mut self, lost_bytes: u16, packet_number: u64, now: Instant) {}
 
     /// Packets were incorrectly deemed lost
     ///
