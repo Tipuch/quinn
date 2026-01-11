@@ -39,6 +39,86 @@ const PACING_RATE_1_2MBPS: f64 = 1200.0 * 1000.0;
 /// inspired by a previous version of BBR2 used in cloudflare's quiche
 const PACING_RATE_24MBPS: f64 = 24000.0 * 1000.0;
 
+/// 64 Kb in bytes
+/// this is the maximum size we want for a quantum in `set_send_quantum`
+/// inspired by a previous version of BBR2 used in cloudflare's quiche
+const HIGH_PACE_MAX_QUANTUM: u64 = 64 * 1000;
+
+/// equivalent to BBR.StartupPacingGain: A constant specifying the minimum gain value for calculating the pacing rate that will allow
+/// the sending rate to double each round (4 * ln(2) ~= 2.77)
+/// [BBRStartupPacingGain]; used in Startup mode for BBR.pacing_gain. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const STARTUP_PACING_GAIN: f64 = 2.773;
+
+/// default pacing gain is 1, when cruising, probing for RTT or refilling <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const DEFAULT_PACING_GAIN: f64 = 1.0;
+
+/// pacing gain when probing bandwidth down <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const PROBE_BW_DOWN_PACING_GAIN: f64 = 0.9;
+
+/// pacing gain when probing bandwidth up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const PROBE_BW_UP_PACING_GAIN: f64 = 1.25;
+
+/// equivalent to BBR.DrainPacingGain: A constant specifying the pacing gain value used in Drain mode,
+/// to attempt to drain the estimated queue at the bottleneck link in one round-trip or less.
+/// As noted in [BBRDrainPacingGain], any value at or below 1 / BBRStartupCwndGain = 1 / 2 = 0.5 will theoretically achieve this.
+/// BBR uses the value 0.35, which has been shown to offer good performance when compared with other alternatives.
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const DRAIN_PACING_GAIN: f64 = 0.5;
+
+/// equivalent to BBR.PacingMarginPercent: The static discount factor of 1% used to scale BBR.bw to produce C.pacing_rate.
+const PACING_MARGIN_PERCENT: f64 = 1.0;
+
+/// equivalent to BBR.DefaultCwndGain: A constant specifying the minimum gain value that allows the sending rate to double each round (2) [BBRStartupCwndGain].
+/// Used by default in most phases for BBR.cwnd_gain.
+const DEFAULT_CWND_GAIN: f64 = 2.0;
+
+/// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const PROBE_BW_UP_CWND_GAIN: f64 = 2.25;
+
+/// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
+const PROBE_RTT_CWND_GAIN: f64 = 0.5;
+
+/// equivalent to BBR.ProbeRTTDuration: A constant specifying the minimum duration for which ProbeRTT state holds C.inflight to BBR.MinPipeCwnd or fewer packets: 200 ms.
+const PROBE_RTT_DURATION_MS: u64 = 200;
+
+/// equivalent to BBR.ProbeRTTInterval: A constant specifying the minimum time interval between ProbeRTT states: 5 secs.
+const PROBE_RTT_INTERVAL_SEC: u64 = 5;
+
+/// equivalent to BBR.LossThresh: A constant specifying the maximum tolerated per-round-trip packet loss rate when probing for bandwidth (the default is 2%).
+const LOSS_THRESH: f64 = 0.02;
+
+/// equivalent to BBR.Beta: A constant specifying the default multiplicative decrease to make upon each round trip during which the connection detects packet loss (the value is 0.7).
+const BETA: f64 = 0.7;
+
+/// equivalent to BBR.Headroom: A constant specifying the multiplicative factor to apply to BBR.inflight_longterm when calculating
+/// a volume of free headroom to try to leave unused in the path
+/// (e.g. free space in the bottleneck buffer or free time slots in the bottleneck link) that can be used by cross traffic (the value is 0.15).
+const HEADROOM: f64 = 0.15;
+
+/// equivalent to BBR.MinRTTFilterLen: A constant specifying the length of the BBR.min_rtt min filter window, BBR.MinRTTFilterLen is 10 secs.
+const MIN_RTT_FILTER_LEN: u64 = 10;
+
+/// multiplier used to check growth when validating if the full bandwidth has been reached
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.1.2-6>
+const FULL_BW_GROWTH: f64 = 1.25;
+
+/// maximum number of rounds needed before we consider that the pipe is full <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.1.2-6>
+const MAX_FULL_BW_COUNT: u64 = 3;
+
+/// when setting `bw_probe_up_rounds` when raising our inflight long term slope we don't go above this
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3.6-8>
+const MAX_LONG_TERM_PROBE_UP_ROUNDS: u32 = 30;
+
+/// max number of rounds used when deciding to coexist with Reno / CUBIC <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3.5.1>
+const MAX_RENO_ROUNDS: u64 = 63;
+
+/// minimum amount of time to wait before probing again <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3.5.3-5>
+const MIN_PROBE_WAIT_MS: u64 = 2000;
+
+/// when waiting before probing again we add up to one second of added wait time
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3.5.3-5>
+const MAX_ADDED_PROBE_WAIT_MS: u64 = 1000;
+
 /// Substates when probing bandwidth
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -173,6 +253,7 @@ struct BbrRateSample {
 #[derive(Debug, Clone)]
 pub struct Bbr3 {
     /// equivalent to C.SMSS The Sender Maximum Send Size in bytes. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-2.1>
+    /// <https://www.rfc-editor.org/rfc/rfc9000#name-datagram-size>
     smss: u64,
     /// equivalent to C.InitialCwnd: The initial congestion window set by the transport protocol implementation for the connection at initialization time.
     initial_cwnd: u64,
@@ -222,7 +303,7 @@ pub struct Bbr3 {
     /// used to generate random numbers when deciding how long to wait before probing again
     probe_rng: Pcg32,
     /// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
-    probe_up_cwnd_gain: f64,
+    probe_bw_up_cwnd_gain: f64,
     /// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
     probe_rtt_cwnd_gain: f64,
     /// equivalent to BBR.state: The current state of a BBR flow in the BBR state machine. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-3.3>
@@ -366,14 +447,31 @@ impl Bbr3 {
         } else {
             probe_rng = Pcg32::from_os_rng();
         }
-        // rfc9000 making sure maximum datagram size is between acceptable values
-        // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
         let smss = min(
             max(MIN_MAX_DATAGRAM_SIZE, current_mtu) as u64,
             MAX_DATAGRAM_SIZE,
         );
         let initial_cwnd = config.initial_window;
+        let startup_pacing_gain = config.startup_pacing_gain.unwrap_or(STARTUP_PACING_GAIN);
+        let default_pacing_gain = config.default_pacing_gain.unwrap_or(DEFAULT_PACING_GAIN);
+        let probe_bw_down_pacing_gain = config
+            .probe_bw_down_pacing_gain
+            .unwrap_or(PROBE_BW_DOWN_PACING_GAIN);
+        let probe_bw_up_pacing_gain = config
+            .probe_bw_up_pacing_gain
+            .unwrap_or(PROBE_BW_UP_PACING_GAIN);
+        let drain_pacing_gain = config.drain_pacing_gain.unwrap_or(DRAIN_PACING_GAIN);
+        let pacing_margin_percent = config
+            .pacing_margin_percent
+            .unwrap_or(PACING_MARGIN_PERCENT);
+        let default_cwnd_gain = config.default_cwnd_gain.unwrap_or(DEFAULT_CWND_GAIN);
+        let probe_bw_up_cwnd_gain = config
+            .probe_bw_up_cwnd_gain
+            .unwrap_or(PROBE_BW_UP_CWND_GAIN);
+        let probe_rtt_cwnd_gain = config.probe_rtt_cwnd_gain.unwrap_or(PROBE_RTT_CWND_GAIN);
+        // the calculation for initial pacing rate described here <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.2-5>
         let nominal_bandwidth = initial_cwnd as f64 / 0.001;
+        let pacing_rate = STARTUP_PACING_GAIN * nominal_bandwidth;
         Self {
             smss,
             initial_cwnd,
@@ -382,28 +480,28 @@ impl Bbr3 {
             is_cwnd_limited: false,
             cycle_count: 0,
             cwnd: initial_cwnd,
-            pacing_rate: 2.773 * nominal_bandwidth,
-            send_quantum: 2 * smss,
-            pacing_gain: 2.773,
-            startup_pacing_gain: 2.773,
-            default_pacing_gain: 1.0,
-            probe_bw_down_pacing_gain: 0.9,
-            probe_bw_up_pacing_gain: 1.25,
-            drain_pacing_gain: 0.5,
-            pacing_margin_percent: 1.0,
-            cwnd_gain: 2.0,
-            default_cwnd_gain: 2.0,
+            pacing_rate,
+            send_quantum: 2 * smss, // we start high, but it will be adjusted in set_send_quantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.3>
+            pacing_gain: startup_pacing_gain,
+            startup_pacing_gain,
+            default_pacing_gain,
+            probe_bw_down_pacing_gain,
+            probe_bw_up_pacing_gain,
+            drain_pacing_gain,
+            pacing_margin_percent,
+            cwnd_gain: default_cwnd_gain,
+            default_cwnd_gain,
             probe_rng,
-            probe_up_cwnd_gain: 2.25,
+            probe_bw_up_cwnd_gain,
             state: BbrState::Startup,
             round_count: 0,
             round_start: true,
             next_round_delivered: 0,
             idle_restart: false,
-            loss_thresh: 0.02,
-            beta: 0.7,
-            headroom: 0.15,
-            min_pipe_cwnd: 4 * MAX_DATAGRAM_SIZE,
+            loss_thresh: LOSS_THRESH,
+            beta: BETA,
+            headroom: HEADROOM,
+            min_pipe_cwnd: 4 * smss, // 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-2.7-4>
             max_bw: 0.0,
             bw_shortterm: 0.0,
             bw: 0.0,
@@ -425,10 +523,10 @@ impl Bbr3 {
             full_bw: 0.0,
             full_bw_count: 0,
             min_rtt_stamp: None,
-            min_rtt_filter_len: 10,
-            probe_rtt_cwnd_gain: 0.5,
-            probe_rtt_duration: Duration::from_millis(200),
-            probe_rtt_interval: Duration::from_secs(5),
+            min_rtt_filter_len: MIN_RTT_FILTER_LEN,
+            probe_rtt_cwnd_gain,
+            probe_rtt_duration: Duration::from_millis(PROBE_RTT_DURATION_MS),
+            probe_rtt_interval: Duration::from_secs(PROBE_RTT_INTERVAL_SEC),
             probe_rtt_min_delay: Duration::ZERO,
             probe_rtt_min_stamp: None,
             probe_rtt_expired: false,
@@ -565,7 +663,9 @@ impl Bbr3 {
     fn pick_probe_wait(&mut self) {
         // 0 or 1
         self.rounds_since_bw_probe = self.probe_rng.random_bool(0.5) as u64;
-        self.bw_probe_wait = Duration::from_millis(2000 + self.probe_rng.random_range(0..=1000));
+        self.bw_probe_wait = Duration::from_millis(
+            MIN_PROBE_WAIT_MS + self.probe_rng.random_range(0..=MAX_ADDED_PROBE_WAIT_MS),
+        );
     }
 
     fn has_elapsed_in_phase(&mut self, interval: Duration, now: Instant) -> bool {
@@ -622,7 +722,7 @@ impl Bbr3 {
 
     fn is_reno_coexistence_probe_time(&self) -> bool {
         let reno_rounds = self.target_inflight();
-        let rounds = min(reno_rounds, 63);
+        let rounds = min(reno_rounds, MAX_RENO_ROUNDS);
         self.rounds_since_bw_probe >= rounds
     }
 
@@ -719,7 +819,7 @@ impl Bbr3 {
             .smss
             .checked_shl(self.bw_probe_up_rounds)
             .unwrap_or(u64::MAX);
-        self.bw_probe_up_rounds = min(self.bw_probe_up_rounds + 1, 30);
+        self.bw_probe_up_rounds = min(self.bw_probe_up_rounds + 1, MAX_LONG_TERM_PROBE_UP_ROUNDS);
         self.probe_up_cnt = max(self.cwnd / growth_this_round, 1);
     }
 
@@ -845,7 +945,7 @@ impl Bbr3 {
         }
         self.state = BbrState::ProbeBw(ProbeBwSubstate::Up);
         self.pacing_gain = self.probe_bw_up_pacing_gain;
-        self.cwnd_gain = self.probe_up_cwnd_gain;
+        self.cwnd_gain = self.probe_bw_up_cwnd_gain;
         self.raise_inflight_long_term_slope();
     }
 
@@ -990,14 +1090,14 @@ impl Bbr3 {
             if rate_sample.is_app_limited {
                 return;
             }
-            if rate_sample.delivery_rate >= self.full_bw * 1.25 {
+            if rate_sample.delivery_rate >= self.full_bw * FULL_BW_GROWTH {
                 self.reset_full_bw();
                 self.full_bw = rate_sample.delivery_rate;
                 return;
             }
         }
         self.full_bw_count += 1;
-        self.full_bw_now = self.full_bw_count >= 3;
+        self.full_bw_now = self.full_bw_count >= MAX_FULL_BW_COUNT;
         if self.full_bw_now {
             self.full_bw_reached = true;
         }
@@ -1122,7 +1222,7 @@ impl Bbr3 {
         self.send_quantum = match self.pacing_rate {
             rate if rate < PACING_RATE_1_2MBPS => MAX_DATAGRAM_SIZE,
             rate if rate < PACING_RATE_24MBPS => 2 * MAX_DATAGRAM_SIZE,
-            _ => min((self.pacing_rate / 1000.0) as u64, 64 * 1024),
+            _ => min((self.pacing_rate / 1000.0) as u64, HIGH_PACE_MAX_QUANTUM),
         };
     }
 
@@ -1416,6 +1516,15 @@ impl Controller for Bbr3 {
 pub struct Bbr3Config {
     initial_window: u64,
     probe_rng_seed: Option<u64>,
+    startup_pacing_gain: Option<f64>,
+    default_pacing_gain: Option<f64>,
+    probe_bw_down_pacing_gain: Option<f64>,
+    probe_bw_up_pacing_gain: Option<f64>,
+    probe_bw_up_cwnd_gain: Option<f64>,
+    probe_rtt_cwnd_gain: Option<f64>,
+    drain_pacing_gain: Option<f64>,
+    pacing_margin_percent: Option<f64>,
+    default_cwnd_gain: Option<f64>,
 }
 
 impl Bbr3Config {
@@ -1433,6 +1542,15 @@ impl Default for Bbr3Config {
         Self {
             initial_window: 14720.clamp(2 * MAX_DATAGRAM_SIZE, 10 * MAX_DATAGRAM_SIZE),
             probe_rng_seed: None,
+            startup_pacing_gain: None,
+            default_pacing_gain: None,
+            probe_bw_down_pacing_gain: None,
+            probe_bw_up_pacing_gain: None,
+            probe_bw_up_cwnd_gain: None,
+            probe_rtt_cwnd_gain: None,
+            drain_pacing_gain: None,
+            pacing_margin_percent: None,
+            default_cwnd_gain: None,
         }
     }
 }
