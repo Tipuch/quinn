@@ -1,7 +1,7 @@
 //! Logic for controlling the rate at which data is sent
 
 use crate::Instant;
-use crate::connection::RttEstimator;
+use crate::connection::{InFlight, RttEstimator};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -55,8 +55,7 @@ pub trait Controller: Send + Sync {
     fn on_end_acks(
         &mut self,
         now: Instant,
-        in_flight: u64,
-        in_flight_ack_eliciting: u64,
+        in_flight: &InFlight,
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
     ) {
@@ -68,6 +67,8 @@ pub trait Controller: Send + Sync {
     /// congestion threshold period ending when the most recent packet in this batch was sent were
     /// lost.
     /// `lost_bytes` indicates how many bytes were lost. This value will be 0 for ECN triggers.
+    /// `largest_lost` indicates the packet number of the packet with the highest packet number
+    /// in the congestion event.
     fn on_congestion_event(
         &mut self,
         now: Instant,

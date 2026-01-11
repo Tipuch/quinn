@@ -61,7 +61,7 @@ mod packet_crypto;
 use packet_crypto::{PrevCrypto, ZeroRttCrypto};
 
 mod paths;
-pub use paths::RttEstimator;
+pub use paths::{InFlight, RttEstimator};
 use paths::{PathData, PathResponses};
 
 pub(crate) mod qlog;
@@ -1512,8 +1512,7 @@ impl Connection {
 
         self.path.congestion.on_end_acks(
             now,
-            self.path.in_flight.bytes,
-            self.path.in_flight.ack_eliciting,
+            &self.path.in_flight,
             self.app_limited,
             self.spaces[space].largest_acked_packet,
         );
@@ -1552,16 +1551,14 @@ impl Connection {
                 if new_largest {
                     let packet_space = &self.spaces[space];
                     let sent = packet_space.largest_acked_packet_sent;
-                    if let Some(largest_sent) = packet_space.largest_acked_packet {
-                        self.process_ecn(
-                            now,
-                            space,
-                            newly_acked.len() as u64,
-                            ecn,
-                            sent,
-                            largest_sent,
-                        );
-                    }
+                    self.process_ecn(
+                        now,
+                        space,
+                        newly_acked.len() as u64,
+                        ecn,
+                        sent,
+                        packet_space.largest_acked_packet.unwrap(),
+                    );
                 }
             } else {
                 // We always start out sending ECN, so any ack that doesn't acknowledge it disables it.

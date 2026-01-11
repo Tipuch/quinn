@@ -421,18 +421,18 @@ struct PathResponse {
 
 /// Summary statistics of packets that have been sent on a particular path, but which have not yet
 /// been acked or deemed lost
-pub(super) struct InFlight {
+pub struct InFlight {
     /// Sum of the sizes of all sent packets considered "in flight" by congestion control
     ///
     /// The size does not include IP or UDP overhead. Packets only containing ACK frames do not
     /// count towards this to ensure congestion control does not impede congestion feedback.
-    pub(super) bytes: u64,
+    pub bytes: u64,
     /// Number of packets in flight containing frames other than ACK and PADDING
     ///
     /// This can be 0 even when bytes is not 0 because PADDING frames cause a packet to be
     /// considered "in flight" by congestion control. However, if this is nonzero, bytes will always
     /// also be nonzero.
-    pub(super) ack_eliciting: u64,
+    pub ack_eliciting: u64,
 }
 
 impl InFlight {

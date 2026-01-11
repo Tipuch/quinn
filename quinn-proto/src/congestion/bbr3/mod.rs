@@ -3,6 +3,7 @@ mod max_filter;
 use crate::RttEstimator;
 use crate::congestion::bbr3::max_filter::MaxFilter;
 use crate::congestion::{Controller, ControllerFactory, ControllerMetrics};
+use crate::connection::InFlight;
 use crate::{Duration, Instant};
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
@@ -1299,12 +1300,11 @@ impl Controller for Bbr3 {
     fn on_end_acks(
         &mut self,
         _now: Instant,
-        _in_flight: u64,
-        in_flight_ack_eliciting: u64,
+        in_flight: &InFlight,
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
     ) {
-        self.inflight = in_flight_ack_eliciting;
+        self.inflight = in_flight.ack_eliciting;
         if let Some(largest_packet_num) = largest_packet_num_acked {
             if app_limited {
                 self.app_limited = largest_packet_num;
