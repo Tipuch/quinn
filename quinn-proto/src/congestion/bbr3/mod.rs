@@ -218,8 +218,8 @@ pub struct Bbr3 {
     /// equivalent to BBR.DefaultCwndGain: A constant specifying the minimum gain value that allows the sending rate to double each round (2) [BBRStartupCwndGain].
     /// Used by default in most phases for BBR.cwnd_gain.
     default_cwnd_gain: f64,
-    /// used to seed the rng needed when deciding how long to wait before probing again
-    probe_rng_seed: Option<u64>,
+    /// used to generate random numbers when deciding how long to wait before probing again
+    probe_rng: Pcg32,
     /// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
     probe_up_cwnd_gain: f64,
     /// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
@@ -359,6 +359,12 @@ pub struct Bbr3 {
 
 impl Bbr3 {
     fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
+        let probe_rng: Pcg32;
+        if let Some(probe_seed) = config.probe_rng_seed {
+            probe_rng = Pcg32::seed_from_u64(probe_seed);
+        } else {
+            probe_rng = Pcg32::from_os_rng();
+        }
         // rfc9000 making sure maximum datagram size is between acceptable values
         // default values come from: https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.txt
         let smss = min(
@@ -386,7 +392,7 @@ impl Bbr3 {
             pacing_margin_percent: 1.0,
             cwnd_gain: 2.0,
             default_cwnd_gain: 2.0,
-            probe_rng_seed: config.probe_rng_seed,
+            probe_rng,
             probe_up_cwnd_gain: 2.25,
             state: BbrState::Startup,
             round_count: 0,
@@ -556,15 +562,9 @@ impl Bbr3 {
     }
 
     fn pick_probe_wait(&mut self) {
-        let mut rng: Pcg32;
-        if let Some(probe_seed) = self.probe_rng_seed {
-            rng = Pcg32::seed_from_u64(probe_seed);
-        } else {
-            rng = Pcg32::from_os_rng();
-        }
         // 0 or 1
-        self.rounds_since_bw_probe = rng.random_bool(0.5) as u64;
-        self.bw_probe_wait = Duration::from_millis(2000 + rng.random_range(0..=1000));
+        self.rounds_since_bw_probe = self.probe_rng.random_bool(0.5) as u64;
+        self.bw_probe_wait = Duration::from_millis(2000 + self.probe_rng.random_range(0..=1000));
     }
 
     fn has_elapsed_in_phase(&mut self, interval: Duration, now: Instant) -> bool {
@@ -1440,5 +1440,24 @@ impl Default for Bbr3Config {
 impl ControllerFactory for Bbr3Config {
     fn build(self: Arc<Self>, _now: Instant, current_mtu: u16) -> Box<dyn Controller> {
         Box::new(Bbr3::new(self, current_mtu))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_probe_rng() {
+        let seed: u64 = 123456789;
+        let mut config = Bbr3Config::default();
+        config.probe_rng_seed = Some(seed);
+        let mut bbr3 = Bbr3::new(Arc::new(config), 2500);
+        bbr3.pick_probe_wait();
+        assert_eq!(bbr3.rounds_since_bw_probe, 1);
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2949));
+        bbr3.pick_probe_wait();
+        assert_eq!(bbr3.rounds_since_bw_probe, 1);
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2590));
     }
 }
