@@ -271,7 +271,7 @@ pub struct Bbr3 {
     is_cwnd_limited: bool,
     /// equivalent to BBR.cycle_count: The virtual time used by the BBR.max_bw filter window. Note that BBR.cycle_count only needs to be tracked with a single bit,
     /// since the BBR.max_bw_filter only needs to track samples from two time slots: the previous ProbeBW cycle and the current ProbeBW cycle.
-    cycle_count: u64,
+    cycle_count: bool,
     /// equivalent to C.cwnd: The transport sender's congestion window. When transmitting data, the sending connection ensures that C.inflight does not exceed C.cwnd.
     cwnd: u64,
     /// equivalent to C.pacing_rate: The current pacing rate for a BBR flow, which controls inter-packet spacing.
@@ -319,14 +319,6 @@ pub struct Bbr3 {
     next_round_delivered: u64,
     /// equivalent to BBR.idle_restart: A boolean that is true if and only if a connection is restarting after being idle.
     idle_restart: bool,
-    /// equivalent to BBR.LossThresh: A constant specifying the maximum tolerated per-round-trip packet loss rate when probing for bandwidth (the default is 2%).
-    loss_thresh: f64,
-    /// equivalent to BBR.Beta: A constant specifying the default multiplicative decrease to make upon each round trip during which the connection detects packet loss (the value is 0.7).
-    beta: f64,
-    /// equivalent to BBR.Headroom: A constant specifying the multiplicative factor to apply to BBR.inflight_longterm when calculating
-    /// a volume of free headroom to try to leave unused in the path
-    /// (e.g. free space in the bottleneck buffer or free time slots in the bottleneck link) that can be used by cross traffic (the value is 0.15).
-    headroom: f64,
     /// equivalent to BBR.MinPipeCwnd: The minimal C.cwnd value BBR targets, to allow pipelining with endpoints that follow an "ACK every other packet" delayed-ACK policy: 4 * C.SMSS.
     min_pipe_cwnd: u64,
     /// equivalent to BBR.max_bw: The windowed maximum recent bandwidth sample, obtained using the BBR delivery rate sampling algorithm in
@@ -384,8 +376,6 @@ pub struct Bbr3 {
     full_bw_count: u64,
     /// equivalent to BBR.min_rtt_stamp: The wall clock time at which the current BBR.min_rtt sample was obtained.
     min_rtt_stamp: Option<Instant>,
-    /// equivalent to BBR.MinRTTFilterLen: A constant specifying the length of the BBR.min_rtt min filter window, BBR.MinRTTFilterLen is 10 secs.
-    min_rtt_filter_len: u64,
     /// equivalent to BBR.ProbeRTTDuration: A constant specifying the minimum duration for which ProbeRTT state holds C.inflight to BBR.MinPipeCwnd or fewer packets: 200 ms.
     probe_rtt_duration: Duration,
     /// equivalent to BBR.ProbeRTTInterval: A constant specifying the minimum time interval between ProbeRTT states: 5 secs.
@@ -474,14 +464,14 @@ impl Bbr3 {
         let probe_rtt_cwnd_gain = config.probe_rtt_cwnd_gain.unwrap_or(PROBE_RTT_CWND_GAIN);
         // the calculation for initial pacing rate described here <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.2-5>
         let nominal_bandwidth = initial_cwnd as f64 / 0.001;
-        let pacing_rate = STARTUP_PACING_GAIN * nominal_bandwidth;
+        let pacing_rate = startup_pacing_gain * nominal_bandwidth;
         Self {
             smss,
             initial_cwnd,
             delivered: 0,
             inflight: 0,
             is_cwnd_limited: false,
-            cycle_count: 0,
+            cycle_count: false,
             cwnd: initial_cwnd,
             pacing_rate,
             send_quantum: 2 * smss, // we start high, but it will be adjusted in set_send_quantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.3>
@@ -501,9 +491,6 @@ impl Bbr3 {
             round_start: true,
             next_round_delivered: 0,
             idle_restart: false,
-            loss_thresh: LOSS_THRESH,
-            beta: BETA,
-            headroom: HEADROOM,
             min_pipe_cwnd: 4 * smss, // 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-2.7-4>
             max_bw: 0.0,
             bw_shortterm: 0.0,
@@ -526,7 +513,6 @@ impl Bbr3 {
             full_bw: 0.0,
             full_bw_count: 0,
             min_rtt_stamp: None,
-            min_rtt_filter_len: MIN_RTT_FILTER_LEN,
             probe_rtt_cwnd_gain,
             probe_rtt_duration: Duration::from_millis(PROBE_RTT_DURATION_MS),
             probe_rtt_interval: Duration::from_secs(PROBE_RTT_INTERVAL_SEC),
@@ -586,7 +572,7 @@ impl Bbr3 {
             let inflight_prev = rate_sample.tx_in_flight.saturating_sub(lost_bytes);
             let lost_prev = rate_sample.lost.saturating_sub(lost_bytes);
             let compared_loss = inflight_prev.saturating_sub(lost_prev);
-            let lost_prefix = (self.loss_thresh * compared_loss as f64) / (1.0 - self.loss_thresh);
+            let lost_prefix = (LOSS_THRESH * compared_loss as f64) / (1.0 - LOSS_THRESH);
             let inflight_at_loss = inflight_prev + lost_prefix as u64;
             return inflight_at_loss;
         }
@@ -633,7 +619,7 @@ impl Bbr3 {
             if !rate_sample.is_app_limited {
                 self.inflight_longterm = max(
                     rate_sample.tx_in_flight,
-                    (self.target_inflight() as f64 * self.beta) as u64,
+                    (self.target_inflight() as f64 * BETA) as u64,
                 );
             }
         }
@@ -646,7 +632,7 @@ impl Bbr3 {
     /// equivalent to IsInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.5.10.2-1>
     fn is_inflight_too_high(&self) -> bool {
         if let Some(rate_sample) = self.rs {
-            return rate_sample.lost as f64 > rate_sample.tx_in_flight as f64 * self.loss_thresh;
+            return rate_sample.lost as f64 > rate_sample.tx_in_flight as f64 * LOSS_THRESH;
         }
         false
     }
@@ -826,10 +812,7 @@ impl Bbr3 {
         if self.inflight_longterm == u64::MAX {
             return u64::MAX;
         }
-        let total_headroom = max(
-            self.smss,
-            (self.headroom * self.inflight_longterm as f64) as u64,
-        );
+        let total_headroom = max(self.smss, (HEADROOM * self.inflight_longterm as f64) as u64);
         if let Some(inflight_with_headroom) = self.inflight_longterm.checked_sub(total_headroom) {
             max(inflight_with_headroom, self.min_pipe_cwnd)
         } else {
@@ -875,7 +858,7 @@ impl Bbr3 {
 
     /// equivalent to BBRAdvanceMaxBwFilter <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.5.6>
     fn advance_max_bw_filter(&mut self) {
-        self.cycle_count += 1;
+        self.cycle_count = !self.cycle_count;
     }
 
     /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3.6-8>
@@ -946,13 +929,13 @@ impl Bbr3 {
     /// equivalent to BBRLossLowerBounds <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.5.10.3-8>
     fn loss_lower_bounds(&mut self) {
         // gives max of both f64
-        self.bw_shortterm = [self.bw_latest, self.beta * self.bw_shortterm]
+        self.bw_shortterm = [self.bw_latest, BETA * self.bw_shortterm]
             .iter()
             .copied()
             .fold(f64::NAN, f64::max);
         self.inflight_shortterm = max(
             self.inflight_latest,
-            (self.beta * self.inflight_shortterm as f64) as u64,
+            (BETA * self.inflight_shortterm as f64) as u64,
         );
     }
 
@@ -1085,8 +1068,10 @@ impl Bbr3 {
             if rate_sample.delivery_rate > 0.0
                 && (rate_sample.delivery_rate >= self.max_bw || !rate_sample.is_app_limited)
             {
-                self.max_bw_filter
-                    .update_max(self.cycle_count, rate_sample.delivery_rate.round() as u64);
+                self.max_bw_filter.update_max(
+                    self.cycle_count as u64,
+                    rate_sample.delivery_rate.round() as u64,
+                );
 
                 self.max_bw = self.max_bw_filter.get_max() as f64;
             }
@@ -1200,7 +1185,7 @@ impl Bbr3 {
         if let Some(min_rtt_stamp) = self.min_rtt_stamp {
             min_rtt_expired = now
                 > min_rtt_stamp
-                    .checked_add(Duration::from_secs(self.min_rtt_filter_len))
+                    .checked_add(Duration::from_secs(MIN_RTT_FILTER_LEN))
                     .unwrap_or(min_rtt_stamp);
         } else {
             min_rtt_expired = true;
@@ -1395,19 +1380,19 @@ impl Controller for Bbr3 {
         self.handle_restart_from_idle(now);
     }
 
-    fn on_packet_acked(
+    fn on_ack(
         &mut self,
         now: Instant,
         sent: Instant,
-        bytes: u16,
+        bytes: u64,
         packet_number: u64,
+        _app_limited: bool,
         rtt: &RttEstimator,
     ) {
-        let bytes64 = bytes as u64;
         if let Some(mut rate_sample) = self.rs {
-            rate_sample.newly_acked += bytes64;
+            rate_sample.newly_acked += bytes;
             self.rs = Some(rate_sample);
-            self.delivered += bytes64;
+            self.delivered += bytes;
             self.delivered_time = Some(now);
         }
         let p_index_result = self
@@ -1447,7 +1432,7 @@ impl Controller for Bbr3 {
                         tx_in_flight: p.tx_in_flight,
                         send_elapsed: p.send_time - p.first_send_time,
                         ack_elapsed: self.delivered_time.unwrap_or(now) - p.delivered_time,
-                        newly_acked: bytes64,
+                        newly_acked: bytes,
                         newly_lost: 0,
                         lost: 0,
                         last_end_seq: packet_number,

@@ -1645,13 +1645,11 @@ impl Connection {
                 now,
                 info.time_sent,
                 info.size.into(),
+                pn,
                 self.app_limited,
                 &self.path.rtt,
             );
         }
-        self.path
-            .congestion
-            .on_packet_acked(now, info.time_sent, info.size, pn, &self.path.rtt);
 
         // Update state for confirmed delivery of frames
         if let Some(retransmits) = info.retransmits.get() {

@@ -33,19 +33,8 @@ pub trait Controller: Send + Sync {
         now: Instant,
         sent: Instant,
         bytes: u64,
+        pn: u64,
         app_limited: bool,
-        rtt: &RttEstimator,
-    ) {
-    }
-
-    /// One packet was just acked
-    #[allow(unused_variables)]
-    fn on_packet_acked(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        bytes: u16,
-        packet_number: u64,
         rtt: &RttEstimator,
     ) {
     }
