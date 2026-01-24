@@ -1565,6 +1565,13 @@ impl Controller for Bbr3 {
 }
 
 /// Configuration for the `Bbr3` congestion controller
+/// Different pacing_gains can be set to modify the multiplier used to
+/// increase the sending rates.
+/// Different cwnd_gains can be set to modify the multiplier used to increase
+/// the congestion windows.
+/// All of these parameters are specific to different states of the algorithm: see `BbrState`
+/// `pacing_margin_percent` is used to set a margin when calculating the `pacing_rate` in order
+/// to not send at 100% capacity when calculating pacing.
 #[derive(Debug, Clone)]
 pub struct Bbr3Config {
     initial_window: u64,

@@ -44,6 +44,9 @@ impl MaxFilter {
         self.samples[0].value.unwrap_or(0)
     }
 
+    /// `current_round` represents a sequence number counting upwards, it can eventually reset to 0
+    /// and continue counting upwards.
+    /// `measurement` is what is tracked as the max values over time
     pub(super) fn update_max(&mut self, current_round: u64, measurement: u64) {
         let sample = MaxSample {
             round: current_round,
@@ -68,7 +71,7 @@ impl MaxFilter {
         self.subwin_update(sample);
     }
 
-    /* As time advances, update the 1st, 2nd, and 3rd choices. */
+    /// As time advances, update the 1st, 2nd, and 3rd choices.
     fn subwin_update(&mut self, sample: MaxSample) {
         let dt = sample.round - self.samples[0].round;
         if dt > self.window {
