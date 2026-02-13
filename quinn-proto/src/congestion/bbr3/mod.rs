@@ -304,6 +304,8 @@ pub struct Bbr3 {
     /// Used by default in most phases for BBR.cwnd_gain.
     default_cwnd_gain: f64,
     /// used to generate random numbers when deciding how long to wait before probing again
+    /// using Pcg32 as it's a fast general purpose random number generator and fits our purpose here
+    /// these numbers will not be security critical as they're only used to decide when to probe the connection next.
     probe_rng: Pcg32,
     /// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
     probe_bw_up_cwnd_gain: f64,
@@ -436,7 +438,7 @@ impl Bbr3 {
     fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
         let probe_rng: Pcg32;
         if let Some(probe_seed) = config.probe_rng_seed {
-            probe_rng = Pcg32::seed_from_u64(probe_seed);
+            probe_rng = Pcg32::from_seed(probe_seed);
         } else {
             probe_rng = Pcg32::from_os_rng();
         }
@@ -1575,7 +1577,7 @@ impl Controller for Bbr3 {
 #[derive(Debug, Clone)]
 pub struct Bbr3Config {
     initial_window: u64,
-    probe_rng_seed: Option<u64>,
+    probe_rng_seed: Option<[u8; 16]>,
     startup_pacing_gain: Option<f64>,
     default_pacing_gain: Option<f64>,
     probe_bw_down_pacing_gain: Option<f64>,
@@ -1627,7 +1629,7 @@ mod test {
 
     #[test]
     fn test_probe_rng() {
-        let seed: u64 = 123456789;
+        let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let config = Bbr3Config {
             initial_window: 14720.clamp(2 * MAX_DATAGRAM_SIZE, 10 * MAX_DATAGRAM_SIZE),
             probe_rng_seed: Some(seed),

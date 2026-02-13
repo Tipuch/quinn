@@ -24,7 +24,6 @@ const MAX_FILTER_LEN: usize = 3;
 /// by definition, and it samples the most recent one. So we restart fresh on
 /// every new max and overwrites 2nd & 3rd choices. The same property
 /// holds for 2nd & 3rd best.
-///
 #[derive(Copy, Clone, Debug)]
 pub(super) struct MaxFilter {
     window: u64,
@@ -53,11 +52,13 @@ impl MaxFilter {
             value: Some(measurement),
         };
 
-        if self.samples[0].value.is_none()  /* uninitialised */
-            || /* found new max? */ sample.value >= self.samples[0].value
-            || /* nothing left in window? */ sample.round - self.samples[2].round > self.window
+        if self.samples[0].value.is_none()  // uninitialised
+            || sample.round == 0 // wrapping around
+            ||  sample.value >= self.samples[0].value // found new max?
+            ||  sample.round.saturating_sub(self.samples[2].round) > self.window
+        // nothing left in window?
         {
-            self.samples.fill(sample); /* forget earlier samples */
+            self.samples.fill(sample); // forget earlier samples
             return;
         }
 
@@ -73,7 +74,7 @@ impl MaxFilter {
 
     /// As time advances, update the 1st, 2nd, and 3rd choices.
     fn subwin_update(&mut self, sample: MaxSample) {
-        let dt = sample.round - self.samples[0].round;
+        let dt = sample.round.saturating_sub(self.samples[0].round);
         if dt > self.window {
             /*
              * Passed entire window without a new sample so make 2nd
@@ -85,7 +86,7 @@ impl MaxFilter {
             self.samples[0] = self.samples[1];
             self.samples[1] = self.samples[2];
             self.samples[2] = sample;
-            if sample.round - self.samples[0].round > self.window {
+            if sample.round.saturating_sub(self.samples[0].round) > self.window {
                 self.samples[0] = self.samples[1];
                 self.samples[1] = self.samples[2];
                 self.samples[2] = sample;
@@ -148,5 +149,11 @@ mod test {
         assert_eq!(100, max_filter.get_max());
         max_filter.update_max(round + 18, 130);
         assert_eq!(130, max_filter.get_max());
+        max_filter.update_max(0, 90);
+        assert_eq!(90, max_filter.get_max());
+        max_filter.update_max(1, 80);
+        assert_eq!(90, max_filter.get_max());
+        max_filter.update_max(2, 100);
+        assert_eq!(100, max_filter.get_max());
     }
 }
