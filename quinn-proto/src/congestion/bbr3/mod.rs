@@ -269,7 +269,7 @@ pub struct Bbr3 {
     inflight: u64,
     /// equivalent to C.is_cwnd_limited: True if the connection has fully utilized C.cwnd at any point in the last packet-timed round trip.
     is_cwnd_limited: bool,
-    /// equivalent to BBR.cycle_count: The virtual time used by the BBR.max_bw filter window. Note that BBR.cycle_count only needs to be tracked with a single bit,
+    /// equivalent to BBR.cycle_count: The virtual time used by the BBR.max_bw filter window. Note that this will loop around between 0 and 1
     /// since the BBR.max_bw_filter only needs to track samples from two time slots: the previous ProbeBW cycle and the current ProbeBW cycle.
     cycle_count: bool,
     /// equivalent to C.cwnd: The transport sender's congestion window. When transmitting data, the sending connection ensures that C.inflight does not exceed C.cwnd.
