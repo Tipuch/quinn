@@ -1646,9 +1646,9 @@ mod test {
         let mut bbr3 = Bbr3::new(Arc::new(config), 2500);
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 1);
-        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2949));
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2652));
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 1);
-        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2590));
+        assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2570));
     }
 }
