@@ -113,10 +113,10 @@ impl Controller for Cubic {
     ) {
         if app_limited
             || self
-            .state
-            .recovery_start_time
-            .map(|recovery_start_time| sent <= recovery_start_time)
-            .unwrap_or(false)
+                .state
+                .recovery_start_time
+                .map(|recovery_start_time| sent <= recovery_start_time)
+                .unwrap_or(false)
         {
             return;
         }
