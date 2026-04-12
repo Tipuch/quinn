@@ -63,7 +63,7 @@ const PROBE_BW_UP_PACING_GAIN: f64 = 1.25;
 /// BBR uses the value 0.35, which has been shown to offer good performance when compared with other alternatives.
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-2.4>
 /// <https://github.com/google/bbr/blob/master/Documentation/startup/gain/analysis/bbr_drain_gain.pdf>
-const DRAIN_PACING_GAIN: f64 = 1.0 / STARTUP_PACING_GAIN;
+const DRAIN_PACING_GAIN: f64 = 1.0 / 2.0;
 
 /// equivalent to BBR.PacingMarginPercent: The static discount factor of 1% used to scale BBR.bw to produce C.pacing_rate.
 const PACING_MARGIN_PERCENT: f64 = 1.0;
@@ -293,7 +293,7 @@ pub struct Bbr3 {
     /// equivalent to BBR.DrainPacingGain: A constant specifying the pacing gain value used in Drain mode,
     /// to attempt to drain the estimated queue at the bottleneck link in one round-trip or less.
     /// As noted in BBRDrainPacingGain, any value at or below 1 / BBRStartupCwndGain = 1 / 2 = 0.5 will theoretically achieve this.
-    /// BBR uses the value 0.35, which has been shown to offer good performance when compared with other alternatives.
+    /// BBR uses the value 0.5, which has been shown to offer good performance when compared with other alternatives.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.1>
     drain_pacing_gain: f64,
     /// equivalent to BBR.PacingMarginPercent: The static discount factor of 1% used to scale BBR.bw to produce C.pacing_rate.
@@ -432,6 +432,8 @@ pub struct Bbr3 {
     prior_cwnd: u64,
     /// equivalent to BBR.loss_round_start: flag set to true at the very beginning of a round where loss occurred
     loss_round_start: bool,
+    /// equivalent to BBR.drain_start_round: The value of round_count when Drain state started.
+    drain_start_round: u64,
 }
 
 impl Bbr3 {
@@ -542,6 +544,7 @@ impl Bbr3 {
             probe_rtt_round_done: false,
             prior_cwnd: 0,
             loss_round_start: false,
+            drain_start_round: 0,
         }
     }
 
@@ -899,10 +902,10 @@ impl Bbr3 {
         if self.inflight > self.inflight_with_headroom() {
             return false;
         }
-        if self.inflight <= self.get_inflight(1.0) {
-            return true;
+        if self.inflight > self.get_inflight(1.0) {
+            return false;
         }
-        false
+        true
     }
 
     /// equivalent to BBRStartProbeBW_CRUISE <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.4.4-4>
@@ -1147,6 +1150,7 @@ impl Bbr3 {
         self.state = BbrState::Drain;
         self.pacing_gain = self.drain_pacing_gain;
         self.cwnd_gain = self.default_cwnd_gain;
+        self.drain_start_round = self.round_count;
     }
 
     /// equivalent to BBRCheckStartupDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.1.1-6>
@@ -1159,7 +1163,7 @@ impl Bbr3 {
 
     /// equivalent to BBRCheckDrainDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.2-3>
     fn check_drain_done(&mut self, now: Instant) {
-        if self.state == BbrState::Drain && self.inflight <= self.get_inflight(1.0) {
+        if (self.state == BbrState::Drain && self.inflight <= self.get_inflight(1.0)) || self.round_count > self.drain_start_round + 3 {
             self.enter_probe_bw(now);
         }
     }
