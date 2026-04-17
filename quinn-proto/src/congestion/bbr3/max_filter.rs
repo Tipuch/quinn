@@ -43,8 +43,7 @@ impl MaxFilter {
         self.samples[0].value.unwrap_or(0)
     }
 
-    /// `current_round` represents a sequence number counting upwards, it can eventually reset to 0
-    /// and continue counting upwards.
+    /// `current_round` represents a sequence number counting upwards from 0 monotonically
     /// `measurement` is what is tracked as the max values over time
     pub(super) fn update_max(&mut self, current_round: u64, measurement: u64) {
         let sample = MaxSample {
@@ -53,7 +52,6 @@ impl MaxFilter {
         };
 
         if self.samples[0].value.is_none()  // uninitialised
-            || sample.round == 0 // wrapping around
             ||  sample.value >= self.samples[0].value // found new max?
             ||  sample.round.saturating_sub(self.samples[2].round) > self.window
         // nothing left in window?
@@ -149,11 +147,5 @@ mod test {
         assert_eq!(100, max_filter.get_max());
         max_filter.update_max(round + 18, 130);
         assert_eq!(130, max_filter.get_max());
-        max_filter.update_max(0, 90);
-        assert_eq!(90, max_filter.get_max());
-        max_filter.update_max(1, 80);
-        assert_eq!(90, max_filter.get_max());
-        max_filter.update_max(2, 100);
-        assert_eq!(100, max_filter.get_max());
     }
 }

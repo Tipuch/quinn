@@ -269,9 +269,9 @@ pub struct Bbr3 {
     inflight: u64,
     /// equivalent to C.is_cwnd_limited: True if the connection has fully utilized C.cwnd at any point in the last packet-timed round trip.
     is_cwnd_limited: bool,
-    /// equivalent to BBR.cycle_count: The virtual time used by the BBR.max_bw filter window. Note that this will loop around between 0 and 1
+    /// equivalent to BBR.cycle_count: The virtual time used by the BBR.max_bw filter window.
     /// since the BBR.max_bw_filter only needs to track samples from two time slots: the previous ProbeBW cycle and the current ProbeBW cycle.
-    cycle_count: bool,
+    cycle_count: u64,
     /// equivalent to C.cwnd: The transport sender's congestion window. When transmitting data, the sending connection ensures that C.inflight does not exceed C.cwnd.
     cwnd: u64,
     /// equivalent to C.pacing_rate: The current pacing rate for a BBR flow, which controls inter-packet spacing.
@@ -313,6 +313,8 @@ pub struct Bbr3 {
     probe_rtt_cwnd_gain: f64,
     /// equivalent to BBR.state: The current state of a BBR flow in the BBR state machine. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-3.3>
     state: BbrState,
+    /// equivalent to BBR.undo_state: The state of a BBR flow in the BBR state machine saved in case a loss episode is later declared spurious. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-3.3>
+    undo_state: BbrState,
     /// equivalent to BBR.round_count: Count of packet-timed round trips elapsed so far.
     round_count: u64,
     /// equivalent to BBR.round_start: A boolean that BBR sets to true once per packet-timed round trip, on ACKs that advance BBR.round_count.
@@ -330,6 +332,10 @@ pub struct Bbr3 {
     /// equivalent to BBR.bw_shortterm: The short-term maximum sending bandwidth that the algorithm estimates is safe for matching the current network path delivery rate,
     /// based on any loss signals in the current bandwidth probing cycle. This is generally lower than max_bw. (Part of the short-term model.)
     bw_shortterm: f64,
+    /// equivalent to BBR.undo_bw_shortterm: The short-term maximum sending bandwidth that the algorithm estimates is safe for matching the current network path delivery rate,
+    /// based on any loss signals in the current bandwidth probing cycle. This is generally lower than max_bw. (Part of the short-term model.)
+    /// saved state in case a loss episode is later declared spurious
+    undo_bw_shortterm: f64,
     /// equivalent to BBR.bw: The maximum sending bandwidth that the algorithm estimates is appropriate for matching the current network path delivery rate,
     /// given all available signals in the model, at any time scale. It is the min() of max_bw and bw_shortterm.
     bw: f64,
@@ -352,10 +358,21 @@ pub struct Bbr3 {
     /// and observes that sending a particular inflight causes a loss rate higher than the loss rate threshold,
     /// it sets inflight_longterm to that volume of data. (Part of the long-term model.)
     inflight_longterm: u64,
+    /// equivalent to BBR.inflight_longterm: The long-term maximum inflight that the algorithm estimates will produce acceptable queue pressure,
+    /// based on signals in the current or previous bandwidth probing cycle, as measured by loss. That is, if a flow is probing for bandwidth,
+    /// and observes that sending a particular inflight causes a loss rate higher than the loss rate threshold,
+    /// it sets inflight_longterm to that volume of data. (Part of the long-term model.)
+    /// saved state in case a loss episode is later declared spurious
+    undo_inflight_longterm: u64,
     /// equivalent to BBR.inflight_shortterm: Analogous to BBR.bw_shortterm,
     /// the short-term maximum inflight that the algorithm estimates is safe for matching the current network path delivery process,
     /// based on any loss signals in the current bandwidth probing cycle. This is generally lower than max_inflight or inflight_longterm. (Part of the short-term model.)
     inflight_shortterm: u64,
+    /// equivalent to BBR.undo_inflight_shortterm: Analogous to BBR.bw_shortterm,
+    /// the short-term maximum inflight that the algorithm estimates is safe for matching the current network path delivery process,
+    /// based on any loss signals in the current bandwidth probing cycle. This is generally lower than max_inflight or inflight_longterm. (Part of the short-term model.)
+    /// saved state in case a loss episode is later declared spurious
+    undo_inflight_shortterm: u64,
     /// equivalent to BBR.bw_latest: a 1-round-trip max of delivered bandwidth (RS.delivery_rate).
     bw_latest: f64,
     /// equivalent to BBR.inflight_latest: a 1-round-trip max of delivered volume of data (RS.delivered).
@@ -475,7 +492,7 @@ impl Bbr3 {
             delivered: 0,
             inflight: 0,
             is_cwnd_limited: false,
-            cycle_count: false,
+            cycle_count: 0,
             cwnd: initial_cwnd,
             pacing_rate,
             send_quantum: 2 * smss, // we start high, but it will be adjusted in set_send_quantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.6.3>
@@ -491,6 +508,7 @@ impl Bbr3 {
             probe_rng,
             probe_bw_up_cwnd_gain,
             state: BbrState::Startup,
+            undo_state: BbrState::Startup,
             round_count: 0,
             round_start: true,
             next_round_delivered: 0,
@@ -498,6 +516,7 @@ impl Bbr3 {
             min_pipe_cwnd: 4 * smss, // 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-2.7-4>
             max_bw: 0.0,
             bw_shortterm: 0.0,
+            undo_bw_shortterm: 0.0,
             bw: 0.0,
             min_rtt: Duration::from_secs(u64::MAX),
             bdp: 0,
@@ -505,7 +524,9 @@ impl Bbr3 {
             offload_budget: 0,
             max_inflight: 0,
             inflight_longterm: 0,
+            undo_inflight_longterm: 0,
             inflight_shortterm: 0,
+            undo_inflight_shortterm: 0,
             bw_latest: 0.0,
             inflight_latest: 0,
             max_bw_filter: MaxFilter::new(MAX_BW_FILTER_LEN as u64),
@@ -567,7 +588,17 @@ impl Bbr3 {
         if !self.loss_in_round {
             self.loss_round_delivered = self.delivered;
         }
+        self.save_state_upon_loss();
         self.loss_in_round = true;
+    }
+
+    /// equivalent to BBRSaveStateUponLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.11.1>
+    /// Save state in case a loss episode is later declared spurious
+    fn save_state_upon_loss(&mut self) {
+        self.undo_state = self.state;
+        self.undo_bw_shortterm = self.bw_shortterm;
+        self.undo_inflight_shortterm = self.inflight_shortterm;
+        self.undo_inflight_longterm = self.inflight_longterm;
     }
 
     /// equivalent to BBRInflightAtLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.5.10.2-11>
@@ -863,7 +894,7 @@ impl Bbr3 {
 
     /// equivalent to BBRAdvanceMaxBwFilter <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.5.6>
     fn advance_max_bw_filter(&mut self) {
-        self.cycle_count = !self.cycle_count;
+        self.cycle_count = self.cycle_count.saturating_add(1);
     }
 
     /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.3.6-8>
@@ -1073,10 +1104,8 @@ impl Bbr3 {
             if rate_sample.delivery_rate > 0.0
                 && (rate_sample.delivery_rate >= self.max_bw || !rate_sample.is_app_limited)
             {
-                self.max_bw_filter.update_max(
-                    self.cycle_count as u64,
-                    rate_sample.delivery_rate.round() as u64,
-                );
+                self.max_bw_filter
+                    .update_max(self.cycle_count, rate_sample.delivery_rate.round() as u64);
 
                 self.max_bw = self.max_bw_filter.get_max() as f64;
             }
@@ -1163,7 +1192,9 @@ impl Bbr3 {
 
     /// equivalent to BBRCheckDrainDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#section-5.3.2-3>
     fn check_drain_done(&mut self, now: Instant) {
-        if (self.state == BbrState::Drain && self.inflight <= self.get_inflight(1.0)) || self.round_count > self.drain_start_round + 3 {
+        if (self.state == BbrState::Drain && self.inflight <= self.get_inflight(1.0))
+            || self.round_count > self.drain_start_round + 3
+        {
             self.enter_probe_bw(now);
         }
     }
@@ -1533,6 +1564,25 @@ impl Controller for Bbr3 {
             .binary_search_by_key(&(packet_number), |p| p.packet_number);
         if let Ok(p_index) = p_index_result {
             self.process_lost_packet(lost_bytes_64, p_index, now);
+        }
+    }
+
+    /// equivalent to BBRHandleSpuriousLossDetection: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.11.2>
+    fn on_spurious_congestion_event(&mut self) {
+        self.loss_in_round = false;
+        self.reset_full_bw();
+        self.bw_shortterm = [self.bw_shortterm, self.undo_bw_shortterm]
+            .iter()
+            .copied()
+            .fold(f64::NAN, f64::max);
+        self.inflight_shortterm = max(self.inflight_shortterm, self.undo_inflight_shortterm);
+        self.inflight_longterm = max(self.inflight_longterm, self.undo_inflight_longterm);
+        if self.state != BbrState::ProbeRtt && self.state != self.undo_state {
+            if self.undo_state == BbrState::Startup {
+                self.enter_startup();
+            } else if self.undo_state == BbrState::ProbeBw(ProbeBwSubstate::Up) {
+                self.start_probe_bw_up();
+            }
         }
     }
 
