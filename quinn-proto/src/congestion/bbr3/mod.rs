@@ -194,6 +194,8 @@ struct BbrPacket {
     tx_in_flight: u64,
     /// packet number from the connection
     packet_number: u64,
+    /// packet size in bytes
+    size: u16,
     /// equivalent to P.lost: C.lost when the packet was sent
     lost: u64,
     /// used to flag acknowledgement within our VecDeque, a packet can be flagged lost after having been flagged acknowledged
@@ -515,18 +517,18 @@ impl Bbr3 {
             idle_restart: false,
             min_pipe_cwnd: 4 * smss, // 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.7-4>
             max_bw: 0.0,
-            bw_shortterm: 0.0,
-            undo_bw_shortterm: 0.0,
+            bw_shortterm: f64::INFINITY,
+            undo_bw_shortterm: f64::INFINITY,
             bw: 0.0,
             min_rtt: Duration::from_secs(u64::MAX),
             bdp: 0,
             extra_acked: 0,
             offload_budget: 0,
             max_inflight: 0,
-            inflight_longterm: 0,
-            undo_inflight_longterm: 0,
-            inflight_shortterm: 0,
-            undo_inflight_shortterm: 0,
+            inflight_longterm: u64::MAX,
+            undo_inflight_longterm: u64::MAX,
+            inflight_shortterm: u64::MAX,
+            undo_inflight_shortterm: u64::MAX,
             bw_latest: 0.0,
             inflight_latest: 0,
             max_bw_filter: MaxFilter::new(MAX_BW_FILTER_LEN as u64),
@@ -603,14 +605,15 @@ impl Bbr3 {
 
     /// equivalent to BBRInflightAtLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
     /// We check at what prefix of packet did losses exceed `loss_thresh`
-    fn inflight_at_loss(&mut self, lost_bytes: u64) -> u64 {
+    fn inflight_at_loss(&mut self, packet_size: u64) -> u64 {
         if let Some(rate_sample) = self.rs {
-            let inflight_prev = rate_sample.tx_in_flight.saturating_sub(lost_bytes);
-            let lost_prev = rate_sample.lost.saturating_sub(lost_bytes);
-            let compared_loss = inflight_prev.saturating_sub(lost_prev);
-            let lost_prefix = (LOSS_THRESH * compared_loss as f64) / (1.0 - LOSS_THRESH);
+            let inflight_prev = rate_sample.tx_in_flight.saturating_sub(packet_size);
+            let inflight_prev_threshold = LOSS_THRESH * inflight_prev as f64;
+            let lost_prev = rate_sample.lost.saturating_sub(packet_size);
+            let compared_loss = (inflight_prev_threshold.round() as u64) - lost_prev;
+            let lost_prefix = compared_loss as f64 / (1.0 - LOSS_THRESH);
             let inflight_at_loss = inflight_prev + lost_prefix as u64;
-            return inflight_at_loss;
+            return inflight_at_loss
         }
         0
     }
@@ -631,7 +634,7 @@ impl Bbr3 {
 
     /// equivalent to BBRProbeRTTCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.5-1>
     fn probe_rtt_cwnd(&mut self) -> u64 {
-        let mut probe_rtt_cwnd = self.bdp_multiple(self.probe_rtt_cwnd_gain);
+        let mut probe_rtt_cwnd = self.bdp_multiple(self.bw, self.probe_rtt_cwnd_gain);
         probe_rtt_cwnd = max(probe_rtt_cwnd, self.min_pipe_cwnd);
         probe_rtt_cwnd
     }
@@ -769,11 +772,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRBDPMultiple <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
-    fn bdp_multiple(&mut self, gain: f64) -> u64 {
+    fn bdp_multiple(&mut self, bw: f64, gain: f64) -> u64 {
         if self.min_rtt == Duration::from_secs(u64::MAX) {
             return self.initial_cwnd;
         }
-        self.bdp = (self.bw * self.min_rtt.as_secs_f64()).round() as u64;
+        self.bdp = (bw * self.min_rtt.as_secs_f64()).round() as u64;
         (gain * self.bdp as f64) as u64
     }
 
@@ -795,13 +798,13 @@ impl Bbr3 {
 
     /// equivalent to BBRInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
     fn get_inflight(&mut self, gain: f64) -> u64 {
-        let inflight_cap = self.bdp_multiple(gain);
+        let inflight_cap = self.bdp_multiple(self.max_bw, gain);
         self.quantization_budget(inflight_cap)
     }
 
     /// equivalent to BBRUpdateMaxInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
     fn update_max_inflight(&mut self) {
-        let mut inflight_cap = self.bdp_multiple(self.cwnd_gain);
+        let mut inflight_cap = self.bdp_multiple(self.max_bw, self.cwnd_gain);
         inflight_cap += self.extra_acked;
         self.max_inflight = self.quantization_budget(inflight_cap);
     }
@@ -816,6 +819,7 @@ impl Bbr3 {
     /// equivalent to BBRStartRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1-9>
     fn start_round(&mut self) {
         self.next_round_delivered = self.delivered;
+        self.is_cwnd_limited = false;
     }
 
     /// equivalent to BBRUpdateRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1-9>
@@ -908,8 +912,6 @@ impl Bbr3 {
                     if !rate_sample.is_app_limited {
                         self.advance_max_bw_filter();
                     }
-                } else {
-                    self.advance_max_bw_filter();
                 }
             }
         }
@@ -1087,7 +1089,9 @@ impl Bbr3 {
     /// equivalent to BBRAdaptLowerBoundsFromCongestion <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
     fn adapt_lower_bounds_from_congestion(&mut self) {
         match self.state {
-            BbrState::ProbeBw(_) => {}
+            BbrState::ProbeBw(ProbeBwSubstate::Refill)
+            | BbrState::ProbeBw(ProbeBwSubstate::Up)
+            | BbrState::Startup => {}
             _ => {
                 if self.loss_in_round {
                     self.init_lower_bounds();
@@ -1192,8 +1196,9 @@ impl Bbr3 {
 
     /// equivalent to BBRCheckDrainDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.2-3>
     fn check_drain_done(&mut self, now: Instant) {
-        if (self.state == BbrState::Drain && self.inflight <= self.get_inflight(1.0))
-            || self.round_count > self.drain_start_round + 3
+        if self.state == BbrState::Drain
+            && (self.inflight <= self.get_inflight(1.0)
+                || self.round_count > self.drain_start_round + 3)
         {
             self.enter_probe_bw(now);
         }
@@ -1266,8 +1271,10 @@ impl Bbr3 {
                 }
             }
         }
-        if self.delivered > 0 {
-            self.idle_restart = false;
+        if let Some(rate_sample) = self.rs {
+            if rate_sample.delivered > 0 {
+                self.idle_restart = false;
+            }
         }
     }
 
@@ -1284,6 +1291,7 @@ impl Bbr3 {
     /// equivalent to BBRUpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
     fn update_model_and_state(&mut self, p: BbrPacket, now: Instant) {
         self.update_latest_delivery_signals();
+        self.reset_congestion_signals();
         self.update_congestion_signals(p);
         self.update_ack_aggregation(now);
         self.check_full_bw_reached();
@@ -1377,6 +1385,7 @@ impl Bbr3 {
         let p = self.packets[packet_index];
         self.note_loss();
         if !self.bw_probe_samples {
+            self.packets.remove(packet_index);
             return;
         }
         if let Some(mut rate_sample) = self.rs {
@@ -1385,7 +1394,7 @@ impl Bbr3 {
             rate_sample.lost = self.lost.saturating_sub(p.lost);
             rate_sample.is_app_limited = p.is_app_limited;
             if self.is_inflight_too_high() {
-                rate_sample.tx_in_flight = self.inflight_at_loss(lost_bytes);
+                rate_sample.tx_in_flight = self.inflight_at_loss(p.size as u64);
                 self.handle_inflight_too_high(now);
             }
             self.rs = Some(rate_sample);
@@ -1409,6 +1418,7 @@ impl Controller for Bbr3 {
             is_app_limited: self.app_limited != 0,
             tx_in_flight: self.inflight,
             packet_number,
+            size: bytes,
             lost: self.lost,
             acknowledged: false,
             stale: false,
@@ -1494,10 +1504,16 @@ impl Controller for Bbr3 {
     ) {
         self.inflight = in_flight;
         if let Some(largest_packet_num) = largest_packet_num_acked {
-            if app_limited && self.delivered > self.app_limited {
-                self.app_limited = largest_packet_num;
-            } else {
+            if self.app_limited != 0 && largest_packet_num > self.app_limited {
                 self.app_limited = 0;
+            } else if app_limited {
+                self.app_limited = self.app_limited.max(largest_packet_num);
+            }
+            self.packets.retain(|&p| !p.stale);
+            for p in self.packets.iter_mut() {
+                if p.acknowledged || self.round_count - p.round_count > ROUND_COUNT_WINDOW {
+                    p.stale = true;
+                }
             }
             if let Some(mut rate_sample) = self.rs {
                 if rate_sample.prior_delivered == 0 {
@@ -1519,19 +1535,11 @@ impl Controller for Bbr3 {
                     self.is_cwnd_limited = true;
                 }
                 self.rs = Some(rate_sample);
-                self.packets.retain(|&p| !p.stale);
-                for p in self.packets.iter_mut() {
-                    if p.acknowledged || self.round_count - p.round_count > ROUND_COUNT_WINDOW {
-                        p.stale = true;
-                    }
-                }
                 rate_sample.newly_acked = 0;
                 rate_sample.lost = 0;
                 rate_sample.newly_lost = 0;
                 self.rs = Some(rate_sample);
             }
-        } else if self.app_limited > 0 && self.delivered > self.app_limited {
-            self.app_limited = 0;
         }
     }
 
@@ -1539,7 +1547,7 @@ impl Controller for Bbr3 {
         &mut self,
         now: Instant,
         _sent: Instant,
-        _is_persistent_congestion: bool,
+        is_persistent_congestion: bool,
         is_ecn: bool,
         lost_bytes: u64,
         largest_lost: u64,
@@ -1552,6 +1560,9 @@ impl Controller for Bbr3 {
                 .binary_search_by_key(&(largest_lost), |p| p.packet_number);
             if let Ok(p_index) = p_index_result {
                 self.process_lost_packet(lost_bytes, p_index, now);
+            }
+            if is_persistent_congestion {
+                self.cwnd = self.min_pipe_cwnd;
             }
         }
     }
