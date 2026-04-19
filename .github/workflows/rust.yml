@@ -2,11 +2,15 @@ name: CI
 
 on:
   push:
-    branches: ['main', '0.8.x']
+    branches: ['main', '0.11.x']
   pull_request:
   merge_group:
   schedule:
     - cron: "21 3 * * 5"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-freebsd:
@@ -150,7 +154,7 @@ jobs:
           ! wasm-tools print --skeleton target/wasm32-unknown-unknown/debug/quinn.wasm | grep 'import "env"'
 
       # Match the version of wasm-bindgen used in `Cargo.lock`
-      - run: cargo binstall wasm-bindgen-cli@0.2.114 --locked --no-confirm
+      - run: cargo binstall wasm-bindgen-cli@0.2.118 --locked --no-confirm
       - run: cargo test --locked -p quinn-proto --target wasm32-unknown-unknown
 
   msrv:
@@ -158,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # Note that we must also update the README when changing the MSRV
-      - uses: dtolnay/rust-toolchain@1.80.0
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --lib --all-features -p quinn-udp -p quinn-proto -p quinn
 
@@ -219,7 +223,7 @@ jobs:
         java-version: '21'
 
     - name: Install Android SDK
-      uses: android-actions/setup-android@v3
+      uses: android-actions/setup-android@v4
 
     - name: Install Android NDK
       run: sdkmanager --install "ndk;25.2.9519653"

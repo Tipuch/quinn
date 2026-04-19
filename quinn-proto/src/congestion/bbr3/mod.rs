@@ -613,7 +613,7 @@ impl Bbr3 {
             let compared_loss = (inflight_prev_threshold.round() as u64) - lost_prev;
             let lost_prefix = compared_loss as f64 / (1.0 - LOSS_THRESH);
             let inflight_at_loss = inflight_prev + lost_prefix as u64;
-            return inflight_at_loss
+            return inflight_at_loss;
         }
         0
     }

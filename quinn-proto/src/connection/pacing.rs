@@ -17,20 +17,34 @@ pub(super) struct Pacer {
     last_window: u64,
     last_mtu: u16,
     tokens: u64,
+    max_bytes_per_second: Option<u64>,
     prev: Instant,
 }
 
 impl Pacer {
     /// Obtains a new [`Pacer`].
-    pub(super) fn new(smoothed_rtt: Duration, window: u64, mtu: u16, now: Instant) -> Self {
+    pub(super) fn new(
+        smoothed_rtt: Duration,
+        window: u64,
+        mtu: u16,
+        max_bytes_per_second: Option<u64>,
+        now: Instant,
+    ) -> Self {
+        let window = rate_limited_window(smoothed_rtt, window, max_bytes_per_second);
         let capacity = optimal_capacity(smoothed_rtt, window, mtu);
         Self {
             capacity,
             last_window: window,
             last_mtu: mtu,
             tokens: capacity,
+            max_bytes_per_second,
             prev: now,
         }
+    }
+
+    /// Obtains the `max_bytes_per_second` used when this [`Pacer`] was constructed.
+    pub(crate) fn max_bytes_per_second(&self) -> Option<u64> {
+        self.max_bytes_per_second
     }
 
     /// Record that a packet has been transmitted.
@@ -67,6 +81,7 @@ impl Pacer {
             "zero-sized congestion control window is nonsense"
         );
 
+        let window = rate_limited_window(smoothed_rtt, window, self.max_bytes_per_second);
         if window != self.last_window || mtu != self.last_mtu {
             self.capacity = optimal_capacity(smoothed_rtt, window, mtu);
 
@@ -173,6 +188,27 @@ fn optimal_capacity(smoothed_rtt: Duration, window: u64, mtu: u16) -> u64 {
     )
 }
 
+/// Clamps the window to limit the sending rate to `max_bytes_per_second`.
+///
+/// If `max_bytes_per_second` is `None`, the original window is returned.
+fn rate_limited_window(
+    smoothed_rtt: Duration,
+    window: u64,
+    max_bytes_per_second: Option<u64>,
+) -> u64 {
+    let Some(max_bytes_per_second) = max_bytes_per_second else {
+        return window;
+    };
+
+    let rate_window = max_bytes_per_second as f64 * smoothed_rtt.as_secs_f64();
+
+    // the pacer refills tokens at x1.25 speed, so we shrink the window to cancel out the speedup
+    // (otherwise the actual sending rate could be higher than `max_bytes_per_second`)
+    let adjusted_rate_window = (rate_window / 1.25).round();
+
+    Ord::min(window, Ord::max(adjusted_rate_window as u64, 1))
+}
+
 /// Period of traffic to batch together on a reasonably fast connection
 const TARGET_BURST_INTERVAL: Duration = Duration::from_millis(2);
 
@@ -199,7 +235,7 @@ mod tests {
         let rtt = Duration::from_micros(400);
 
         assert!(
-            Pacer::new(rtt, 30000, 1500, new_instant)
+            Pacer::new(rtt, 30000, 1500, None, new_instant)
                 .delay(
                     Duration::from_micros(0),
                     0,
@@ -212,7 +248,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            Pacer::new(rtt, 30000, 1500, new_instant)
+            Pacer::new(rtt, 30000, 1500, None, new_instant)
                 .delay(
                     Duration::from_micros(0),
                     1600,
@@ -225,7 +261,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            Pacer::new(rtt, 30000, 1500, new_instant)
+            Pacer::new(rtt, 30000, 1500, None, new_instant)
                 .delay(
                     Duration::from_micros(0),
                     1500,
@@ -246,18 +282,18 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
 
-        let pacer = Pacer::new(rtt, window, mtu, now);
+        let pacer = Pacer::new(rtt, window, mtu, None, now);
         assert_eq!(
             pacer.capacity,
             (window as u128 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
         );
         assert_eq!(pacer.tokens, pacer.capacity);
 
-        let pacer = Pacer::new(Duration::from_millis(0), window, mtu, now);
+        let pacer = Pacer::new(Duration::from_millis(0), window, mtu, None, now);
         assert_eq!(pacer.capacity, MAX_BURST_SIZE * mtu as u64);
         assert_eq!(pacer.tokens, pacer.capacity);
 
-        let pacer = Pacer::new(rtt, 1, mtu, now);
+        let pacer = Pacer::new(rtt, 1, mtu, None, now);
         assert_eq!(pacer.capacity, mtu as u64);
         assert_eq!(pacer.tokens, pacer.capacity);
     }
@@ -269,7 +305,7 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
 
-        let mut pacer = Pacer::new(rtt, window, mtu, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
         assert_eq!(
             pacer.capacity,
             (window as u128 * TARGET_BURST_INTERVAL.as_nanos() / rtt.as_nanos()) as u64
@@ -308,7 +344,7 @@ mod tests {
         let rtt = Duration::from_millis(50);
         let old_instant = Instant::now();
 
-        let mut pacer = Pacer::new(rtt, window, mtu, old_instant);
+        let mut pacer = Pacer::new(rtt, window, mtu, None, old_instant);
         let packet_capacity = pacer.capacity / mtu as u64;
 
         for _ in 0..packet_capacity {
@@ -377,13 +413,47 @@ mod tests {
     }
 
     #[test]
+    fn computes_pause_correctly_for_rate_limited() {
+        let window = 2_000_000u64;
+        let mtu = 1000;
+        let rtt = Duration::from_millis(50);
+        let old_instant = Instant::now();
+
+        let mut pacer = Pacer::new(rtt, window, mtu, Some(2_000), old_instant);
+        assert_eq!(
+            pacer.delay(rtt, 1_000, mtu, window, old_instant, None, None),
+            None,
+            "When capacity is available packets should be sent immediately"
+        );
+        pacer.on_transmit(mtu);
+
+        let actual_delay = pacer
+            .delay(rtt, 1_000, mtu, window, old_instant, None, None)
+            .expect("Send must be delayed")
+            .duration_since(old_instant);
+
+        let expected_delay = Duration::from_millis(500);
+        let diff = actual_delay.abs_diff(expected_delay);
+
+        // Allow up to 2ns difference due to rounding
+        assert!(
+            diff < Duration::from_nanos(2),
+            "expected ≈ {expected_delay:?}, got {actual_delay:?} (diff {diff:?})"
+        );
+
+        // Should be able to send after a while
+        let now = old_instant + expected_delay / 2;
+        assert_eq!(pacer.delay(rtt, 500, mtu, window, now, None, None), None);
+    }
+
+    #[test]
     fn adjusts_capacity_from_congestion() {
         let window = 2_000_000;
         let mtu = 1500;
         let rtt = Duration::from_millis(50);
         let now = Instant::now();
         let send_quantum = Some(20000);
-        let mut pacer = Pacer::new(rtt, window, mtu, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
         pacer.delay(rtt, mtu as u64, mtu, window * 2, now, send_quantum, None);
         assert_eq!(pacer.capacity, 20000);
     }
@@ -396,7 +466,7 @@ mod tests {
         let now = Instant::now();
         let send_quantum = Some(20000);
         let pacing_rate = Some(200_000_000); //200 MB/s in bytes/s
-        let mut pacer = Pacer::new(rtt, window, mtu, now);
+        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
         // 40_000 B / 200_000_000 MB/s = 0.0002 sec = 200 microseconds
         assert_eq!(
             pacer.delay(rtt, 40000, mtu, window, now, send_quantum, pacing_rate),

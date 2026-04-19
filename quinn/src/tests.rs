@@ -826,7 +826,7 @@ async fn multiple_conns_with_zero_length_cids() {
     let mut factory = EndpointFactory::new();
     factory
         .endpoint_config
-        .cid_generator(|| Box::new(RandomConnectionIdGenerator::new(0)));
+        .cid_generator(Arc::new(|| Box::new(RandomConnectionIdGenerator::new(0))));
     let server = {
         let _guard = error_span!("server").entered();
         factory.endpoint()
@@ -1055,6 +1055,43 @@ async fn recv_stream_cancel_stop_drop() {
             recv_dropped.wait().await;
         },
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_endpoint_cleans_up() {
+    let _guard = subscribe();
+
+    let mut endpoint_factory = EndpointFactory::new();
+    let cid_generator = Arc::new(|| -> Box<dyn proto::ConnectionIdGenerator> {
+        Box::<proto::HashedConnectionIdGenerator>::default()
+    });
+    endpoint_factory
+        .endpoint_config
+        .cid_generator(cid_generator.clone());
+    let endpoint = endpoint_factory.endpoint();
+    drop(endpoint_factory);
+    assert_eq!(Arc::strong_count(&cid_generator), 2);
+    drop(endpoint);
+    // Let the driver task run; paused runtimes are guaranteed to drain pending work on sleep.
+    tokio::time::sleep(Duration::from_millis(1)).await;
+    assert_eq!(Arc::strong_count(&cid_generator), 1);
+}
+
+#[tokio::test]
+async fn dropped_connection_cleans_up() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    join!(
+        async {
+            endpoint
+                .connect(endpoint.local_addr().unwrap(), "localhost")
+                .unwrap()
+                .await
+                .unwrap()
+        },
+        async { endpoint.accept().await.unwrap().await.unwrap() }
+    );
+    endpoint.wait_idle().await;
 }
 
 #[derive(Default)]
