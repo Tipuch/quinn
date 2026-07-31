@@ -1,6 +1,7 @@
 //! Logic for controlling the rate at which data is sent
 
 use crate::connection::RttEstimator;
+pub use crate::packet::SpaceId;
 use crate::{Duration, Instant};
 use std::any::Any;
 use std::sync::Arc;
@@ -20,8 +21,11 @@ pub trait Controller: Send + Sync {
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {}
 
     /// One packet was just sent
+    ///
+    /// `packet_number` identifies the packet only within `space`; every packet number space
+    /// numbers independently from zero.
     #[allow(unused_variables)]
-    fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet_number: u64) {}
+    fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet_number: u64, space: SpaceId) {}
 
     /// The connection had data to send but was blocked by the congestion window
     ///
@@ -33,6 +37,7 @@ pub trait Controller: Send + Sync {
     ///
     /// `app_limited` indicates whether the connection was blocked on outgoing
     /// application data prior to receiving these acknowledgements.
+    /// `pn` identifies the packet only within `space`.
     #[allow(unused_variables)]
     fn on_ack(
         &mut self,
@@ -40,6 +45,7 @@ pub trait Controller: Send + Sync {
         sent: Instant,
         bytes: u64,
         pn: u64,
+        space: SpaceId,
         app_limited: bool,
         rtt: &RttEstimator,
     ) {
@@ -53,6 +59,7 @@ pub trait Controller: Send + Sync {
         in_flight: u64,
         app_limited: bool,
         largest_packet_num_acked: Option<u64>,
+        space: SpaceId,
     ) {
     }
 
@@ -63,7 +70,7 @@ pub trait Controller: Send + Sync {
     /// lost.
     /// `lost_bytes` indicates how many bytes were lost. This value will be 0 for ECN triggers.
     /// `largest_lost` indicates the packet number of the packet with the highest packet number
-    /// in the congestion event.
+    /// in the congestion event, within `space`.
     fn on_congestion_event(
         &mut self,
         now: Instant,
@@ -72,11 +79,21 @@ pub trait Controller: Send + Sync {
         is_ecn: bool,
         lost_bytes: u64,
         largest_lost: u64,
+        space: SpaceId,
     );
 
     /// One packet was just lost
+    ///
+    /// `packet_number` identifies the packet only within `space`.
     #[allow(unused_variables)]
-    fn on_packet_lost(&mut self, lost_bytes: u16, packet_number: u64, now: Instant) {}
+    fn on_packet_lost(
+        &mut self,
+        lost_bytes: u16,
+        packet_number: u64,
+        space: SpaceId,
+        now: Instant,
+    ) {
+    }
 
     /// Packets were incorrectly deemed lost
     ///
