@@ -9,7 +9,9 @@ use rand_pcg::Pcg32;
 
 use crate::RttEstimator;
 use crate::congestion::bbr3::max_filter::MaxFilter;
-use crate::congestion::{Controller, ControllerFactory, ControllerMetrics, SpaceId};
+use crate::congestion::{
+    BASE_DATAGRAM_SIZE, Controller, ControllerFactory, ControllerMetrics, SpaceId,
+};
 use crate::{Duration, Instant};
 
 /// equivalent to BBR.MaxBwFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.10>
@@ -587,7 +589,8 @@ impl Bbr3 {
             probe_rtt_cwnd_gain,
             probe_rtt_duration: Duration::from_millis(PROBE_RTT_DURATION_MS),
             probe_rtt_interval: Duration::from_secs(PROBE_RTT_INTERVAL_SEC),
-            probe_rtt_min_delay: Duration::ZERO,
+            // Infinity, as for `min_rtt`: a min filter zero-initialized is never lowered.
+            probe_rtt_min_delay: Duration::from_secs(u64::MAX),
             probe_rtt_min_stamp: None,
             probe_rtt_expired: false,
             delivered_time: None,
@@ -1039,16 +1042,22 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRUpdateMinRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3>
+    /// equivalent to BBRUpdateMinRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>
+    ///
+    /// The draft stamps `probe_rtt_min_stamp` at connection init, so the first ProbeRTT falls due
+    /// one `probe_rtt_interval` later. Before the first ack there is no RTT sample to stamp, so an
+    /// unset stamp counts as not yet expired and the first sample starts the interval; counting it
+    /// as expired instead would dip every connection into ProbeRTT — and so into `min_pipe_cwnd`,
+    /// since `bw` is still 0 — on its very first ack.
     fn update_min_rtt(&mut self, now: Instant) {
-        if let Some(probe_rtt_min_stamp) = self.probe_rtt_min_stamp {
-            self.probe_rtt_expired = now
-                > probe_rtt_min_stamp
+        self.probe_rtt_expired = match self.probe_rtt_min_stamp {
+            Some(probe_rtt_min_stamp) => {
+                now > probe_rtt_min_stamp
                     .checked_add(self.probe_rtt_interval)
-                    .unwrap_or(probe_rtt_min_stamp);
-        } else {
-            self.probe_rtt_expired = true;
-        }
+                    .unwrap_or(probe_rtt_min_stamp)
+            }
+            None => false,
+        };
         if let Some(rate_sample) = self.rs {
             if rate_sample.rtt >= Duration::from_secs(0)
                 && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired)
@@ -1846,7 +1855,9 @@ impl Bbr3Config {
 impl Default for Bbr3Config {
     fn default() -> Self {
         Self {
-            initial_window: 14720.clamp(2 * MAX_DATAGRAM_SIZE, 10 * MAX_DATAGRAM_SIZE),
+            // Bounded by the datagram size a path starts at, not [`MAX_DATAGRAM_SIZE`] (the
+            // RFC 9000 ceiling), which would clamp 14720 up to 9x the intended window.
+            initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
             probe_rng_seed: None,
             startup_pacing_gain: None,
             default_pacing_gain: None,
@@ -2026,7 +2037,7 @@ mod test {
     fn test_probe_rng() {
         let seed: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let config = Bbr3Config {
-            initial_window: 14720.clamp(2 * MAX_DATAGRAM_SIZE, 10 * MAX_DATAGRAM_SIZE),
+            initial_window: 14720.clamp(2 * BASE_DATAGRAM_SIZE, 10 * BASE_DATAGRAM_SIZE),
             probe_rng_seed: Some(seed),
             startup_pacing_gain: None,
             default_pacing_gain: None,
@@ -2950,7 +2961,9 @@ mod test {
         // time at which the bottleneck finishes serving everything queued so far
         let mut btl_free_ns: u64 = 0;
         let mut inflight: u64 = 0;
-        let mut pn: u64 = 0;
+        // From 1: `C.app_limited` uses 0 to mean "not app-limited", so packet number 0 could
+        // never be stamped app-limited and would break the premise below.
+        let mut pn: u64 = 1;
 
         // Signals gathered over the run; every assertion is checked after the loop.
         // The set of states ever visited (must stay within {Startup, ProbeRtt}).
@@ -2992,6 +3005,12 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
+                // Emulate the connection layer's C.app_limited (index of the last
+                // packet sent while the app had no more data) before the send, so
+                // this packet is stamped app-limited at send time: the app is
+                // limited from the very first packet on. Same shape as A.2/A.6.
+                bbr.app_limited = pn;
+
                 bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
                 inflight += MSS;
                 flight.push_back(InFlight {
@@ -2999,11 +3018,6 @@ mod test {
                     send_ns,
                     ack_ns,
                 });
-
-                // Emulate the connection layer's C.app_limited (index of the last
-                // packet sent while the app had no more data) so the next packet is
-                // stamped app-limited at send time. Same shape as A.2/A.6.
-                bbr.app_limited = pn;
 
                 // pace the next send at BBR's chosen pacing rate
                 let pacing = bbr.pacing_rate.max(1.0);
