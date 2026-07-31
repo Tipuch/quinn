@@ -1387,9 +1387,12 @@ impl Bbr3 {
             if send_time > first_send_time {
                 return true;
             }
-            if let Some(rate_sample) = self.rs {
-                if rate_sample.last_packet.space == space && end_seq > rate_sample.last_end_seq {
-                    return true;
+            if send_time == first_send_time {
+                if let Some(rate_sample) = self.rs {
+                    if rate_sample.last_packet.space == space && end_seq > rate_sample.last_end_seq
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -1723,9 +1726,9 @@ impl Controller for Bbr3 {
             if let Ok(p_index) = p_index_result {
                 self.process_lost_packet(lost_bytes, p_index, space, now);
             }
-            if is_persistent_congestion {
-                self.cwnd = self.min_pipe_cwnd;
-            }
+        }
+        if is_persistent_congestion {
+            self.cwnd = self.min_pipe_cwnd;
         }
     }
 
