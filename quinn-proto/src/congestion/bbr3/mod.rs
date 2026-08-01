@@ -1762,6 +1762,7 @@ impl Controller for Bbr3 {
             MAX_DATAGRAM_SIZE,
         );
         self.min_pipe_cwnd = 4 * self.smss;
+        self.set_send_quantum();
         self.set_cwnd();
     }
 
