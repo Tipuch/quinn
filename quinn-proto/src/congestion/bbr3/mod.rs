@@ -421,7 +421,9 @@ pub struct Bbr3 {
     /// equivalent to C.first_send_time: If packets are in flight, then this holds the send time of the packet that was most recently marked as delivered.
     /// Else, if the connection was recently idle, then this holds the send time of most recently sent packet.
     first_send_time: Option<Instant>,
-    /// equivalent to C.app_limited: The index of the last transmitted packet marked as application-limited, or 0 if the connection is not currently application-limited.
+    /// equivalent to C.app_limited: marks the application-limited phase, or 0 if the connection is
+    /// not currently application-limited. A byte index into the delivery stream, so a packet sent
+    /// after the marker was taken is recognisable by its `P.delivered` exceeding it.
     app_limited: u64,
     /// equivalent to C.lost: the number of bytes that have been lost during the lifetime of this connection
     lost: u64,
@@ -1668,6 +1670,7 @@ impl Controller for Bbr3 {
         }
     }
 
+    /// equivalent to GenerateRateSample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
     fn on_end_acks(
         &mut self,
         _now: Instant,
@@ -1677,11 +1680,11 @@ impl Controller for Bbr3 {
         _space: SpaceId,
     ) {
         self.inflight = in_flight;
-        if let Some(largest_packet_num) = largest_packet_num_acked {
-            if self.app_limited != 0 && largest_packet_num > self.app_limited {
+        if largest_packet_num_acked.is_some() {
+            if self.app_limited != 0 && self.delivered > self.app_limited {
                 self.app_limited = 0;
             } else if app_limited {
-                self.app_limited = self.app_limited.max(largest_packet_num);
+                self.app_limited = Ord::max(self.delivered + self.inflight, 1);
             }
             let round_count = self.round_count;
             for packets in self.packets.iter_mut() {
@@ -1693,9 +1696,6 @@ impl Controller for Bbr3 {
                 }
             }
             if let Some(mut rate_sample) = self.rs {
-                if rate_sample.prior_delivered == 0 {
-                    return;
-                }
                 rate_sample.interval = Ord::max(rate_sample.send_elapsed, rate_sample.ack_elapsed);
                 rate_sample.delivered = self.delivered.saturating_sub(rate_sample.prior_delivered);
                 // ignore this condition on an initially high min rtt as per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1.2.3-5>
@@ -1781,6 +1781,7 @@ impl Controller for Bbr3 {
             Ord::max(MIN_MAX_DATAGRAM_SIZE, new_mtu) as u64,
             MAX_DATAGRAM_SIZE,
         );
+        self.min_pipe_cwnd = 4 * self.smss;
         self.set_cwnd();
     }
 
@@ -2226,13 +2227,10 @@ mod test {
                     ack_ns,
                     lost,
                 });
-                // Emulate the connection layer's C.app_limited (the index of the
-                // last packet sent while the app had no more data). BBR's folded
-                // `on_end_acks` can only ever raise `app_limited` to the largest
-                // *acked* pn and clears it as soon as a larger pn is acked, so it
-                // cannot keep samples app-limited on its own; set it to the last
-                // sent pn, as a genuinely app-limited quinn connection would.
-                bbr.app_limited = pn;
+                // Emulate MarkConnectionAppLimited. `on_end_acks` only stamps the marker
+                // when the caller reports app-limited, so drive it here as a genuinely
+                // app-limited quinn connection would.
+                bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
                 pn += 1;
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
@@ -2795,12 +2793,9 @@ mod test {
                 });
 
                 if app_limited_phase {
-                    // Emulate the connection layer's C.app_limited (the index of
-                    // the last packet sent while the app had no more data) so the
-                    // next packet is stamped app-limited at send time. Same shape
-                    // as A.2: on_end_acks cannot keep samples app-limited on its
-                    // own, so drive it here.
-                    bbr.app_limited = pn;
+                    // Emulate MarkConnectionAppLimited so the next packet is stamped
+                    // app-limited at send time. Same shape as A.2.
+                    bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
                 }
 
                 // pace the next send at BBR's chosen pacing rate
@@ -3005,11 +3000,10 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                // Emulate the connection layer's C.app_limited (index of the last
-                // packet sent while the app had no more data) before the send, so
-                // this packet is stamped app-limited at send time: the app is
-                // limited from the very first packet on. Same shape as A.2/A.6.
-                bbr.app_limited = pn;
+                // Emulate MarkConnectionAppLimited before the send, so this packet is
+                // stamped app-limited at send time: the app is limited from the very
+                // first packet on. Same shape as A.2/A.6.
+                bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
 
                 bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
                 inflight += MSS;
@@ -3761,7 +3755,7 @@ mod test {
         // re-probe becomes due. Nothing is in flight, so no BBR callbacks fire; time just
         // advances. With no data to send during the gap, the connection is app-limited.
         now_ns = idle_start_ns + PROBE_RTT_INTERVAL_SEC * 1_000_000_000 + 2 * RTT_NS;
-        bbr.app_limited = pn;
+        bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
         assert!(
             now_ns - idle_start_ns >= PROBE_RTT_INTERVAL_SEC * 1_000_000_000,
             "idle gap must exceed ProbeRTTInterval (5 s)"
@@ -6085,9 +6079,9 @@ mod test {
                     ack_ns,
                 });
 
-                // Emulate the connection layer's C.app_limited so the next packet is
-                // stamped app-limited at send time (same shape as A.7).
-                bbr.app_limited = pn;
+                // Emulate MarkConnectionAppLimited so the next packet is stamped
+                // app-limited at send time (same shape as A.7).
+                bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
 
                 // pace the next send at BBR's chosen pacing rate
                 let pacing = bbr.pacing_rate.max(1.0);
@@ -6623,11 +6617,9 @@ mod test {
                 });
 
                 if app_limited_phase {
-                    // Emulate the connection layer's C.app_limited (the index of the
-                    // last packet sent while the app had no more data) so the next
-                    // packet is stamped app-limited at send time. Same shape as A.2/A.6:
-                    // on_end_acks cannot keep samples app-limited on its own.
-                    bbr.app_limited = pn;
+                    // Emulate MarkConnectionAppLimited so the next packet is stamped
+                    // app-limited at send time. Same shape as A.2/A.6.
+                    bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
                 }
 
                 // pace the next send at BBR's chosen pacing rate
