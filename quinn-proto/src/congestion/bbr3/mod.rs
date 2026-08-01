@@ -227,8 +227,6 @@ struct BbrRateSample {
     delivered: u64,
     /// equivalent to RS.prior_delivered: The P.delivered count from the most recent packet delivered.
     prior_delivered: u64,
-    /// equivalent to RS.prior_time: The P.delivered_time from the most recent packet delivered.
-    prior_time: Instant,
     /// equivalent to RS.send_elapsed: Send time interval calculated from the most recent
     ///    packet delivered (see the "Send Rate" section above).
     send_elapsed: Duration,
@@ -242,8 +240,6 @@ struct BbrRateSample {
     tx_in_flight: u64,
     /// equivalent to RS.newly_acked: The volume of data in bytes cumulatively or selectively acknowledged upon the ACK that was just received.
     newly_acked: u64,
-    /// equivalent to RS.newly_lost: The volume of data in bytes newly marked lost upon the ACK that was just received.
-    newly_lost: u64,
     /// equivalent to RS.lost: The volume of data in bytes that was declared lost between the transmission
     /// and acknowledgment of the packet that has just been ACKed (the most recently sent packet among packets ACKed by the ACK that was just received).
     lost: u64,
@@ -427,8 +423,6 @@ pub struct Bbr3 {
     app_limited: u64,
     /// equivalent to C.lost: the number of bytes that have been lost during the lifetime of this connection
     lost: u64,
-    /// equivalent to C.srtt: The smoothed RTT, an exponentially weighted moving average of the observed RTT of the connection.
-    srtt: Duration,
     /// collection of packets in flight or just acknowledged / lost, one queue per packet number
     /// space indexed by `SpaceId as usize`. Packet numbers are only unique and only monotonic
     /// within a space, so the queues must be kept separate for the ordered lookups below to hold.
@@ -599,7 +593,6 @@ impl Bbr3 {
             first_send_time: None,
             app_limited: 0,
             lost: 0,
-            srtt: Duration::ZERO,
             rs: None,
             packets: Default::default(),
             rounds_since_bw_probe: 0,
@@ -1411,13 +1404,7 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRHandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
-    fn process_lost_packet(
-        &mut self,
-        lost_bytes: u64,
-        packet_index: usize,
-        space: SpaceId,
-        now: Instant,
-    ) {
+    fn process_lost_packet(&mut self, packet_index: usize, space: SpaceId, now: Instant) {
         let p = self.packets[space as usize][packet_index];
         self.enter_recovery(now, p.send_time);
         self.note_loss(space, p.packet_number);
@@ -1426,7 +1413,6 @@ impl Bbr3 {
             return;
         }
         if let Some(mut rate_sample) = self.rs {
-            rate_sample.newly_lost += lost_bytes;
             rate_sample.tx_in_flight = p.tx_in_flight;
             rate_sample.lost = self.lost.saturating_sub(p.lost);
             rate_sample.is_app_limited = p.is_app_limited;
@@ -1615,9 +1601,7 @@ impl Controller for Bbr3 {
                 if let Some(mut rate_sample) = self.rs {
                     rate_sample.rtt = now - p.send_time;
                     if is_newest_packet {
-                        self.srtt = rtt.get();
                         rate_sample.prior_delivered = p.delivered;
-                        rate_sample.prior_time = p.delivered_time;
                         rate_sample.is_app_limited = p.is_app_limited;
                         rate_sample.tx_in_flight = p.tx_in_flight;
                         rate_sample.lost = self.lost.saturating_sub(p.lost);
@@ -1640,7 +1624,6 @@ impl Controller for Bbr3 {
                 } else {
                     let rate_sample = BbrRateSample {
                         rtt: rtt.get(),
-                        prior_time: p.delivered_time,
                         interval: Duration::ZERO,
                         delivery_rate: 0.0,
                         is_app_limited: p.is_app_limited,
@@ -1650,14 +1633,12 @@ impl Controller for Bbr3 {
                         send_elapsed: p.send_time - p.first_send_time,
                         ack_elapsed: self.delivered_time.unwrap_or(now) - p.delivered_time,
                         newly_acked: bytes,
-                        newly_lost: 0,
                         lost: self.lost.saturating_sub(p.lost),
                         last_end_seq: packet_number,
                         last_packet: *p,
                     };
                     self.rs = Some(rate_sample);
                     self.first_send_time = Some(p.send_time);
-                    self.srtt = rate_sample.rtt;
                     self.update_model_and_state(rate_sample.last_packet, now);
                     self.update_control_parameters();
                     // Drain newly_acked after folding, as in the branch above.
@@ -1711,7 +1692,6 @@ impl Controller for Bbr3 {
                 self.rs = Some(rate_sample);
                 rate_sample.newly_acked = 0;
                 rate_sample.lost = 0;
-                rate_sample.newly_lost = 0;
                 self.rs = Some(rate_sample);
             }
         }
@@ -1733,7 +1713,7 @@ impl Controller for Bbr3 {
             let p_index_result = self.packets[space as usize]
                 .binary_search_by_key(&largest_lost, |p| p.packet_number);
             if let Ok(p_index) = p_index_result {
-                self.process_lost_packet(lost_bytes, p_index, space, now);
+                self.process_lost_packet(p_index, space, now);
             }
         }
         if is_persistent_congestion {
@@ -1753,7 +1733,7 @@ impl Controller for Bbr3 {
         let p_index_result =
             self.packets[space as usize].binary_search_by_key(&packet_number, |p| p.packet_number);
         if let Ok(p_index) = p_index_result {
-            self.process_lost_packet(lost_bytes_64, p_index, space, now);
+            self.process_lost_packet(p_index, space, now);
         }
     }
 
