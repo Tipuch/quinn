@@ -4848,3 +4848,62 @@ fn send_quantum_bounds_the_gso_batch() {
         "batched {datagrams} datagrams, over the {QUANTUM_DATAGRAMS} the send quantum allows"
     );
 }
+
+/// `C.send_quantum` also bounds what is released at a single instant, not just what one call
+/// writes: `drive_transmit` re-enters `poll_transmit` at the same `now` while the pacer still
+/// has credit, and each call is handed the batch limit afresh. A pacer holding more credit than
+/// the quantum allows would therefore start several quanta back to back.
+#[test]
+fn send_quantum_bounds_repeated_poll_transmits() {
+    /// Datagrams the reported quantum should permit per instant.
+    const QUANTUM_DATAGRAMS: usize = 3;
+    /// Datagrams the caller is willing to accept per call, well above the quantum.
+    const MAX_DATAGRAMS: usize = 10;
+    /// Far more than the quantum, so the sender stays backlogged for the whole probe.
+    const WRITTEN: usize = 256 * 1024;
+
+    let _guard = subscribe();
+
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(Arc::new(FixedQuantumController {
+        send_quantum: QUANTUM_DATAGRAMS as u64 * DEFAULT_MTU as u64,
+    }));
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(client_cfg);
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s)
+        .write(&[42; WRITTEN])
+        .unwrap();
+
+    let now = pair.time;
+    let mut buf = Vec::new();
+    let mut datagrams = 0;
+    // What `drive_transmit` does: poll at a single `now` until told to wait.
+    for _ in 0..1_000 {
+        buf.clear();
+        let Some(transmit) =
+            pair.client_conn_mut(client_ch)
+                .poll_transmit(now, MAX_DATAGRAMS, &mut buf)
+        else {
+            break;
+        };
+        datagrams += match transmit.segment_size {
+            Some(segment_size) => buf.len().div_ceil(segment_size),
+            None => 1,
+        };
+    }
+
+    assert!(
+        datagrams > 0,
+        "the sender was never allowed to transmit, so this proves nothing"
+    );
+    assert!(
+        datagrams <= QUANTUM_DATAGRAMS + 1,
+        "released {datagrams} datagrams at one instant, over the {QUANTUM_DATAGRAMS} the send \
+         quantum allows (plus one datagram of slack)"
+    );
+}
