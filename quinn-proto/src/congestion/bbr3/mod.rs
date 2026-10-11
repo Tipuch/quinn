@@ -1949,6 +1949,17 @@ impl Controller for Bbr3 {
         self.max_ack_delay = requested_max_ack_delay;
     }
 
+    /// Discards packet tracking from in_flight and the controller's packet ring buffer,
+    /// used only when packets shouldn't count as congestion but need to stop being tracked.
+    fn on_packet_discarded(&mut self, bytes: u16, packet_number: u64, space: SpaceId) {
+        self.inflight = self.inflight.saturating_sub(bytes as u64);
+        let p_index_result =
+            self.packets[space as usize].binary_search_by_key(&packet_number, |p| p.packet_number);
+        if let Ok(packet_index) = p_index_result {
+            self.packets[space as usize].remove(packet_index);
+        }
+    }
+
     fn window(&self) -> u64 {
         self.cwnd
     }

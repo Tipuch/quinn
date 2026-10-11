@@ -474,7 +474,6 @@ impl Connection {
         // which for a GSO batch is its datagram count. Controllers that don't compute one leave
         // the batch bounded only by what the caller offered.
         // <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
-        // Nothing `poll_transmit` does alters these, so one snapshot serves the whole call.
         let controller_metrics = self.path.congestion.metrics();
         let max_datagrams = match controller_metrics.send_quantum {
             Some(send_quantum) => {
@@ -669,7 +668,7 @@ impl Connection {
                         bytes_to_send,
                         self.path.current_mtu(),
                         now,
-                        &controller_metrics,
+                        &self.path.congestion.metrics(),
                     ) {
                         self.timers.set(Timer::Pacing, delay);
                         send_blocked = true;
@@ -1898,9 +1897,11 @@ impl Connection {
 
             for &packet in &lost_packets {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
-                self.path
-                    .congestion
-                    .on_packet_lost(info.size, packet, pn_space, now);
+                if info.path_generation == self.path.generation() {
+                    self.path
+                        .congestion
+                        .on_packet_lost(info.size, packet, pn_space, now);
+                }
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,
@@ -1954,6 +1955,9 @@ impl Connection {
         if let Some(packet) = lost_mtu_probe {
             let info = self.spaces[SpaceId::Data].take(packet).unwrap(); // safe: lost_mtu_probe is omitted from lost_packets, and therefore must not have been removed yet
             self.remove_in_flight(&info);
+            self.path
+                .congestion
+                .on_packet_discarded(info.size, packet, SpaceId::Data);
             self.path.mtud.on_probe_lost();
             self.stats.path.lost_plpmtud_probes += 1;
         }
@@ -2357,8 +2361,13 @@ impl Connection {
         space.time_of_last_ack_eliciting_packet = None;
         space.loss_time = None;
         let sent_packets = mem::take(&mut space.sent_packets);
-        for packet in sent_packets.into_values() {
+        for (pn, packet) in sent_packets.into_iter() {
             self.remove_in_flight(&packet);
+            if packet.path_generation == self.path.generation() {
+                self.path
+                    .congestion
+                    .on_packet_discarded(packet.size, pn, space_id);
+            }
         }
         self.set_loss_detection_timer(now)
     }
@@ -2661,8 +2670,13 @@ impl Connection {
 
                 // Retransmit all 0-RTT data
                 let zero_rtt = mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
-                for info in zero_rtt.into_values() {
+                for (pn, info) in zero_rtt.into_iter() {
                     self.remove_in_flight(&info);
+                    if info.path_generation == self.path.generation() {
+                        self.path
+                            .congestion
+                            .on_packet_discarded(info.size, pn, SpaceId::Data);
+                    }
                     self.spaces[SpaceId::Data].pending |= info.retransmits;
                 }
                 self.streams.retransmit_all_for_0rtt();
@@ -2725,8 +2739,15 @@ impl Connection {
                             // Discard 0-RTT packets
                             let sent_packets =
                                 mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
-                            for packet in sent_packets.into_values() {
+                            for (pn, packet) in sent_packets.into_iter() {
                                 self.remove_in_flight(&packet);
+                                if packet.path_generation == self.path.generation() {
+                                    self.path.congestion.on_packet_discarded(
+                                        packet.size,
+                                        pn,
+                                        SpaceId::Data,
+                                    );
+                                }
                             }
                         } else {
                             self.accepted_0rtt = true;

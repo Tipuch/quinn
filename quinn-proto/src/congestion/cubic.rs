@@ -257,6 +257,8 @@ impl Controller for Cubic {
         self.state.window = self.state.window.max(self.minimum_window());
     }
 
+    fn on_packet_discarded(&mut self, _bytes: u16, _packet_number: u64, _space: SpaceId) {}
+
     fn window(&self) -> u64 {
         self.state.window
     }

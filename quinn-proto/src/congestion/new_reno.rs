@@ -114,6 +114,8 @@ impl Controller for NewReno {
         self.window = self.window.max(self.minimum_window());
     }
 
+    fn on_packet_discarded(&mut self, _bytes: u16, _packet_number: u64, _space: SpaceId) {}
+
     fn window(&self) -> u64 {
         self.window
     }

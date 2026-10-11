@@ -154,6 +154,10 @@ pub trait Controller: Send + Sync {
 
     /// Returns Self for use in down-casting to extract implementation details
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
+
+    /// Discards packet tracking from in_flight and packet ring buffer
+    #[allow(unused_variables)]
+    fn on_packet_discarded(&mut self, bytes: u16, packet_number: u64, space: SpaceId) {}
 }
 
 /// Common congestion controller metrics used both for logging purposes
