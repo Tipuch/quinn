@@ -676,7 +676,9 @@ impl Bbr3 {
             undo_inflight_shortterm: u64::MAX,
             bw_latest: 0.0,
             inflight_latest: 0,
-            max_bw_filter: MaxFilter::new(MAX_BW_FILTER_LEN as u64),
+            // The Nichols filter holds a sample for `window + 1` cycle slots (it expires on `dt > window`),
+            // so we pass one less to span exactly MAX_BW_FILTER_LEN ProbeBW cycles.
+            max_bw_filter: MaxFilter::new(MAX_BW_FILTER_LEN as u64 - 1),
             extra_acked_interval_start: None,
             extra_acked_delivered: 0,
             extra_acked_filter: MaxFilter::new(EXTRA_ACKED_FILTER_LEN as u64),
