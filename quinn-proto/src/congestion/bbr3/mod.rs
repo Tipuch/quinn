@@ -1873,6 +1873,7 @@ impl Controller for Bbr3 {
             }
         }
         if is_persistent_congestion {
+            self.save_state_upon_loss();
             self.cwnd = self.min_pipe_cwnd;
         }
     }
