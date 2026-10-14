@@ -259,7 +259,7 @@ impl Endpoint {
         Ok(endpoint
             .recv_state
             .connections
-            .insert(ch, conn, sender, self.runtime.clone()))
+            .insert(ch, conn, sender, false, self.runtime.clone()))
     }
 
     /// Switch to a new UDP socket
@@ -432,6 +432,12 @@ impl Drop for EndpointDriver {
         // Drop all outgoing channels, signaling the termination of the endpoint to the associated
         // connections.
         endpoint.recv_state.connections.senders.clear();
+        // Clearing the senders is what makes the endpoint idle, but a waiter already parked on
+        // `idle` only re-reads that after being notified, and with the driver gone nothing else
+        // can wake it. Same reason as the equivalent check in `EndpointInner::accept`.
+        if endpoint.is_idle() {
+            self.0.shared.idle.notify_waiters();
+        }
     }
 }
 
@@ -482,18 +488,11 @@ impl EndpointInner {
                 state.stats.accepted_handshakes += 1;
                 let sender = state.socket.create_sender();
                 let runtime = state.runtime.clone();
-                let connecting = state
+                let driver_lost = state.driver_lost;
+                Ok(state
                     .recv_state
                     .connections
-                    .insert(handle, conn, sender, runtime);
-                if state.driver_lost {
-                    // The endpoint driver exited while the lock was released. Its destructor
-                    // closed the event channels of the connections that existed at the time,
-                    // which terminates them; do the same for this one so it fails promptly
-                    // rather than waiting for a timeout.
-                    state.recv_state.connections.senders.remove(&handle);
-                }
-                Ok(connecting)
+                    .insert(handle, conn, sender, driver_lost, runtime))
             }
             Err(error) => {
                 if let Some(transmit) = error.response {
@@ -717,6 +716,7 @@ impl ConnectionSet {
         handle: ConnectionHandle,
         conn: proto::Connection,
         sender: Pin<Box<dyn UdpSender>>,
+        driver_lost: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Connecting {
         let (send, recv) = mpsc::unbounded_channel();
@@ -727,7 +727,14 @@ impl ConnectionSet {
             })
             .unwrap();
         }
-        self.senders.insert(handle, send);
+        match driver_lost {
+            // Close the event channel before spawning the connection driver, so it cannot
+            // transmit a handshake after the endpoint driver has stopped.
+            true => drop(send),
+            false => {
+                self.senders.insert(handle, send);
+            }
+        }
         Connecting::new(handle, conn, self.sender.clone(), recv, sender, runtime)
     }
 
@@ -970,14 +977,14 @@ impl RecvState {
                 // Ignore ECONNRESET as it's undefined in QUIC and may be injected by an
                 // attacker
                 Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::ConnectionReset => {
-                    continue;
+                    self.recv_limiter.record_work(1);
                 }
                 // Ignore EMSGSIZE as we're currently not handling ICMPv4 Fragmentation Needed
                 // and ICMPv6 Packet Too Big (PTB) messages since they cannot be authenticated,
                 // and Datagram Packetization Layer Path MTU Discovery (DPLPMTUD) works without
                 // it anyways.
                 Poll::Ready(Err(e)) if is_msg_size_err(&e) => {
-                    continue;
+                    self.recv_limiter.record_work(1);
                 }
                 Poll::Ready(Err(e)) => {
                     return Err(e);
@@ -1010,4 +1017,110 @@ struct PollProgress {
     received_connection_packet: bool,
     /// Whether datagram handling was interrupted early by the work limiter for fairness
     keep_going: bool,
+}
+
+#[cfg(all(
+    test,
+    any(unix, windows),
+    feature = "runtime-tokio",
+    any(feature = "ring", feature = "aws-lc-rs")
+))]
+mod tests {
+    use std::net::UdpSocket;
+
+    use udp::Transmit;
+
+    use super::*;
+    use crate::runtime::TokioRuntime;
+
+    #[test]
+    fn ignored_receive_errors_respect_work_budget() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let size_error = socket
+            .send_to(&vec![0; 65_536], socket.local_addr().unwrap())
+            .unwrap_err();
+        assert!(is_msg_size_err(&size_error));
+
+        for error in [io::ErrorKind::ConnectionReset.into(), size_error] {
+            let mut endpoint =
+                proto::Endpoint::new(Arc::new(EndpointConfig::default()), None, true);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut state = RecvState::new(tx, 1, &endpoint);
+            let now = Instant::now();
+
+            // Calibrate the next receive cycles to allow two work items each.
+            state.recv_limiter.start_cycle(|| now);
+            state.recv_limiter.record_work(2);
+            state.recv_limiter.finish_cycle(|| now + RECV_TIME_BOUND);
+
+            let mut socket = ErrorSocket {
+                error,
+                remaining: 5,
+            };
+            let mut sender = socket.create_sender();
+            let mut cx = Context::from_waker(Waker::noop());
+            for (remaining, keep_going) in [(3, true), (1, true), (0, false)] {
+                state.recv_limiter.start_cycle(|| now);
+                let progress = state
+                    .poll_socket(
+                        &mut cx,
+                        &mut endpoint,
+                        &mut socket,
+                        &mut sender,
+                        &TokioRuntime,
+                        now,
+                    )
+                    .unwrap();
+                state.recv_limiter.finish_cycle(|| now);
+                assert_eq!(socket.remaining, remaining);
+                assert_eq!(progress.keep_going, keep_going);
+                assert!(!progress.received_connection_packet);
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ErrorSocket {
+        error: io::Error,
+        remaining: usize,
+    }
+
+    impl AsyncUdpSocket for ErrorSocket {
+        fn create_sender(&self) -> Pin<Box<dyn UdpSender>> {
+            Box::pin(UnusedSender)
+        }
+
+        fn poll_recv(
+            &mut self,
+            _cx: &mut Context<'_>,
+            _bufs: &mut [IoSliceMut<'_>],
+            _meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            if self.remaining == 0 {
+                return Poll::Pending;
+            }
+            self.remaining -= 1;
+            Poll::Ready(Err(match self.error.raw_os_error() {
+                Some(code) => io::Error::from_raw_os_error(code),
+                None => self.error.kind().into(),
+            }))
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:0".parse().unwrap())
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnusedSender;
+
+    impl UdpSender for UnusedSender {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            _transmit: &Transmit<'_>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("ignored receive errors must not produce responses")
+        }
+    }
 }
