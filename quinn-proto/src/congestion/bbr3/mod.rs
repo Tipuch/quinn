@@ -865,8 +865,12 @@ impl Bbr3 {
         if self.full_bw_reached {
             self.extra_acked_filter.update_max(self.round_count, extra);
             self.extra_acked = self.extra_acked_filter.get_max();
+        } else if self.round_start {
+            // In startup, just remember 1 round (draft 5.5.9, window_length=1): hold the running
+            // max of `extra` within the round, resetting it when the round advances.
+            self.extra_acked = extra;
         } else {
-            self.extra_acked = extra; // In startup, just remember 1 round
+            self.extra_acked = Ord::max(self.extra_acked, extra);
         }
     }
 
@@ -4194,6 +4198,10 @@ mod test {
         let mut peak_startup_max_bw: f64 = 0.0;
         // Captured on the STARTUP -> DRAIN edge, as in A.1.
         let mut transition: Option<(bool, f64)> = None;
+        // `(round_count, extra_acked)` of the previous STARTUP ACK event. In STARTUP,
+        // BBR.extra_acked is the max excess over the current round (draft 5.5.9,
+        // window_length=1), so it must never decrease within a round.
+        let mut last_startup_extra: Option<(u64, u64)> = None;
 
         for _ in 0..2_000_000 {
             let cwnd = bbr.window();
@@ -4257,6 +4265,19 @@ mod test {
 
                 if bbr.state == BbrState::Startup {
                     max_extra_acked = max_extra_acked.max(bbr.extra_acked);
+                    // extra_acked must hold the running max over the current round; a drop within
+                    // the same round means we kept only the latest sample, not the round's max.
+                    if let Some((round, prev)) = last_startup_extra
+                        && bbr.round_count == round
+                    {
+                        assert!(
+                            bbr.extra_acked >= prev,
+                            "extra_acked dropped within STARTUP round {round}: \
+                             {prev} -> {} (should hold the round's max)",
+                            bbr.extra_acked
+                        );
+                    }
+                    last_startup_extra = Some((bbr.round_count, bbr.extra_acked));
                     peak_startup_max_bw = peak_startup_max_bw.max(bbr.max_bw);
                     // bbr.bdp is refreshed to max_bw*min_rtt on every set_cwnd; once the
                     // aggregation estimate is positive it should lift cwnd past 2*BDP.
