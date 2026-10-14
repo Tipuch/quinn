@@ -963,6 +963,7 @@ impl Bbr3 {
     /// <https://datatracker.ietf.org/doc/html/rfc9002#section-7.3.2>
     fn check_recovery_done(&mut self, sent: Instant) {
         if self.recovery_start_time.is_some_and(|start| sent > start) {
+            self.restore_cwnd();
             self.in_recovery = false;
         }
     }
@@ -1265,7 +1266,7 @@ impl Bbr3 {
 
     /// equivalent to BBRSaveCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.4-13>
     fn save_cwnd(&mut self) {
-        if !self.loss_in_round && self.state != BbrState::ProbeRtt {
+        if !self.in_recovery && self.state != BbrState::ProbeRtt {
             self.prior_cwnd = self.cwnd;
         } else {
             self.prior_cwnd = Ord::max(self.prior_cwnd, self.cwnd);
@@ -7621,6 +7622,40 @@ mod test {
         assert_eq!(sim.bbr.inflight_longterm, 100_000);
         assert_eq!(sim.bbr.cwnd, 20_000);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Refill));
+    }
+
+    /// Ending loss recovery by repairing all its losses — not by a spurious-loss undo — restores
+    /// the window saved on entry. Spec 5.6.4.4: the restore applies "equally whether the flow
+    /// exits loss recovery because it finishes repairing all losses or because it executes an
+    /// 'undo' event". Without it cwnd would climb back from the floor one ACK at a time.
+    #[test]
+    fn recovery_exit_restores_the_saved_window() {
+        let mut sim = probing_up();
+        sim.lose(15 * MS, 10);
+        assert_eq!(sim.bbr.prior_cwnd, 20_000);
+
+        // A persistent-congestion collapse floors cwnd far below the saved window.
+        let now = sim.at(16 * MS);
+        let sent = sim.at(10 * MS);
+        sim.bbr
+            .on_congestion_event(now, sent, true, false, 0, 0, SpaceId::Data);
+        assert_eq!(sim.bbr.cwnd, sim.bbr.min_pipe_cwnd);
+
+        // Hold the model above the saved window, so the restore — not the bound — sets cwnd.
+        sim.bbr.inflight_longterm = 100_000;
+        sim.bbr.inflight_shortterm = 100_000;
+
+        // An ACK for a packet sent after the episode began ends recovery. A full-RTT delay keeps
+        // the sample from lowering min_rtt, which would shrink max_inflight below the saved
+        // window and mask the restore.
+        sim.send(16 * MS, 1);
+        sim.ack(26 * MS, [sim.pn - 1], false);
+        assert!(!sim.bbr.in_recovery);
+        assert!(
+            sim.bbr.cwnd >= 20_000,
+            "recovery exit left cwnd at {}, expected the saved window",
+            sim.bbr.cwnd
+        );
     }
 
     /// A probe restarted by undoing its loss exit reacts to loss again.
