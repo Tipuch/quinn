@@ -14,162 +14,45 @@ use crate::congestion::{
 };
 use crate::{Duration, Instant};
 
-/// equivalent to BBR.MaxBwFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.10>
-const MAX_BW_FILTER_LEN: usize = 2;
-
-/// equivalent to BBR.ExtraAckedFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.11>
-const EXTRA_ACKED_FILTER_LEN: usize = 10;
-
-/// safety mechanism to flag packets as stale within our tracking VecDeque. rounds refer to <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1>.
-/// The value of 10 rounds is picked because normally after max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity) <https://datatracker.ietf.org/doc/html/rfc9002#section-6.1.2>
-/// the packet should have been declared lost already, this is just to guarantee that the VecDeque
-/// doesn't grow indefinitely.
-const ROUND_COUNT_WINDOW: u64 = 10;
-
-/// the minimum for the maximum datagram size <https://datatracker.ietf.org/doc/html/rfc9000#section-14>
-const MIN_MAX_DATAGRAM_SIZE: u16 = 1200;
-
-/// the maximum for the maximum datagram size <https://datatracker.ietf.org/doc/html/rfc9000#section-18.2>
-const MAX_DATAGRAM_SIZE: u64 = 65527;
-
-/// 64 KBytes in bytes
-/// one of the default high values for `set_send_quantum`
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
-const HIGH_PACE_MAX_QUANTUM: u64 = 64 * 1024;
-
-/// equivalent to BBR.StartupPacingGain: A constant specifying the minimum gain value for
-/// calculating the pacing rate that will allow the sending rate to double each round (4 * ln(2) ~=
-/// 2.77) BBRStartupPacingGain; used in Startup mode for BBR.pacing_gain. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.4-2>
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
-const STARTUP_PACING_GAIN: f64 = 2.773;
-
-/// default pacing gain is 1, when cruising, probing for RTT or refilling <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
-const DEFAULT_PACING_GAIN: f64 = 1.0;
-
-/// pacing gain when probing bandwidth down <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
-const PROBE_BW_DOWN_PACING_GAIN: f64 = 0.9;
-
-/// pacing gain when probing bandwidth up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
-const PROBE_BW_UP_PACING_GAIN: f64 = 1.25;
-
-/// equivalent to BBR.PacingMarginPercent: The static discount factor of 1% used to scale BBR.bw to
-/// produce C.pacing_rate.
-const PACING_MARGIN_PERCENT: f64 = 1.0;
-
-/// equivalent to BBR.DefaultCwndGain: A constant specifying the minimum gain value that allows the
-/// sending rate to double each round (2) BBRStartupCwndGain. Used by default in most phases for
-/// BBR.cwnd_gain.
-const DEFAULT_CWND_GAIN: f64 = 2.0;
-
-/// equivalent to BBR.DrainPacingGain: A constant specifying the pacing gain value used in Drain
-/// mode, to attempt to drain the estimated queue at the bottleneck link in one round-trip or less.
-/// As noted in BBRDrainPacingGain, any value at or below 1 / BBRStartupCwndGain = 1 / 2 = 0.5 will
-/// theoretically achieve this. BBR uses the value 0.5, which has been shown to offer good
-/// performance when compared with other alternatives. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.4>
-/// <https://github.com/google/bbr/blob/master/Documentation/startup/gain/analysis/bbr_drain_gain.pdf>
-const DRAIN_PACING_GAIN: f64 = 1.0 / DEFAULT_CWND_GAIN;
-
-/// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
-const PROBE_BW_UP_CWND_GAIN: f64 = 2.25;
-
-/// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
-const PROBE_RTT_CWND_GAIN: f64 = 0.5;
-
-/// equivalent to BBR.ProbeRTTDuration: A constant specifying the minimum duration for which
-/// ProbeRTT state holds C.inflight to BBR.MinPipeCwnd or fewer packets: 200 ms.
-const PROBE_RTT_DURATION_MS: u64 = 200;
-
-/// equivalent to BBR.ProbeRTTInterval: A constant specifying the minimum time interval between
-/// ProbeRTT states: 5 secs.
-const PROBE_RTT_INTERVAL_SEC: u64 = 5;
-
-/// equivalent to BBR.LossThresh: A constant specifying the maximum tolerated per-round-trip packet
-/// loss rate when probing for bandwidth (the default is 2%).
-const LOSS_THRESH: f64 = 0.02;
-
-/// equivalent to BBR.Beta: A constant specifying the default multiplicative decrease to make upon
-/// each round trip during which the connection detects packet loss (the value is 0.7).
-const BETA: f64 = 0.7;
-
-/// equivalent to BBR.Headroom: A constant specifying the multiplicative factor to apply to
-/// BBR.inflight_longterm when calculating a volume of free headroom to try to leave unused in the
-/// path (e.g. free space in the bottleneck buffer or free time slots in the bottleneck link) that
-/// can be used by cross traffic (the value is 0.15).
-const HEADROOM: f64 = 0.15;
-
-/// equivalent to BBR.MinRTTFilterLen: A constant specifying the length of the BBR.min_rtt min
-/// filter window, BBR.MinRTTFilterLen is 10 secs.
-const MIN_RTT_FILTER_LEN: u64 = 10;
-
-/// multiplier used to check growth when validating if the full bandwidth has been reached
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.2-6>
-const FULL_BW_GROWTH: f64 = 1.25;
-
-/// maximum number of rounds needed before we consider that the pipe is full <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.2-6>
-const MAX_FULL_BW_COUNT: u64 = 3;
-
-/// equivalent to BBRStartupFullLossCnt: the minimum number of discontiguous loss
-/// events observed within a single round trip before the STARTUP high-loss
-/// estimator is allowed to exit STARTUP.
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.3>
-const STARTUP_FULL_LOSS_CNT: u64 = 6;
-
-/// when setting `bw_probe_up_rounds` when raising our inflight long term slope we don't go above
-/// this <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
-const MAX_LONG_TERM_PROBE_UP_ROUNDS: u32 = 30;
-
-/// equivalent to T_reno_bound: the two candidate values for the round-trip bound used when
-/// deciding to coexist with Reno / CUBIC. The spec picks randomly between them
-/// (`T_reno_bound = pick_randomly_either({62, 63})`) for better mixing and fairness
-/// convergence <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.2>
-const RENO_ROUNDS_BOUNDS: [u64; 2] = [62, 63];
-
-/// minimum amount of time to wait before probing again <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-5>
-const MIN_PROBE_WAIT_MS: u64 = 2000;
-
-/// when waiting before probing again we add up to one second of added wait time
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-5>
-const MAX_ADDED_PROBE_WAIT_MS: u64 = 1000;
-
 /// Substates when probing bandwidth
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ProbeBwSubstate {
     /// Deceleration: sends slower than delivery rate to reduce queue
-    /// equivalent to ProbeBW_DOWN <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.1>
+    /// equivalent to ProbeBW_DOWN <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.1>
     Down,
 
     /// Cruising: sends at delivery rate to maintain high utilization
-    /// equivalent to ProbeBW_CRUISE <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.2>
+    /// equivalent to ProbeBW_CRUISE <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.2>
     Cruise,
 
     /// Refill: sends at BBR.bw for one RTT to fill pipe before probing up
-    /// equivalent to ProbeBW_REFILL <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.3>
+    /// equivalent to ProbeBW_REFILL <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.3>
     Refill,
 
     /// Acceleration: sends faster than delivery rate to probe for more bandwidth
-    /// equivalent to ProbeBW_UP <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.4>
+    /// equivalent to ProbeBW_UP <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.4>
     Up,
 }
 
 /// State Machine description from BBR3
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum BbrState {
     /// Initial state: rapidly probes for bandwidth using high pacing_gain
-    /// equivalent to Startup <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1>
+    /// equivalent to Startup <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1>
     Startup,
 
     /// Drains queue created during Startup by using low pacing_gain (< 1.0)
-    /// equivalent to Drain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.2>
+    /// equivalent to Drain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.2>
     Drain,
 
     /// Steady-state phase that cycles through bandwidth probing tactics
-    /// equivalent to ProbeBW states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3>
+    /// equivalent to ProbeBW states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3>
     ProbeBw(ProbeBwSubstate),
 
     /// Temporarily reduces inflight to measure true min_rtt
-    /// equivalent to ProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4>
+    /// equivalent to ProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4>
     ProbeRtt,
 }
 
@@ -191,7 +74,7 @@ enum AckPhase {
 
 /// Description of a packet for the purposes of analysis through BBR3
 /// all volumes of data use bytes, all rates of data use bytes/sec
-/// equivalent to P <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1.2.1.2>
+/// equivalent to P <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.1.2>
 #[derive(Debug, Clone, Copy)]
 struct BbrPacket {
     /// equivalent to P.delivered: C.delivered when the packet was sent from transport connection
@@ -225,12 +108,12 @@ struct BbrPacket {
     /// once a packet has been acknowledged on a given round it is marked for removal on the next
     /// round.
     stale: bool,
-    /// used to mark packets stale if they're far from the current round <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1>
+    /// used to mark packets stale if they're far from the current round <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>
     round_count: u64,
 }
 
 /// Description of a per-ack rate sample state that will allow us to determine a short term
-/// evolution of the connection equivalent to RS <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.2>
+/// evolution of the connection equivalent to RS <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3>
 #[derive(Debug, Clone, Copy)]
 struct BbrRateSample {
     /// equivalent to RS.delivery_rate: The delivery rate (aka bandwidth) sample obtained from the
@@ -273,13 +156,13 @@ struct BbrRateSample {
 /// Experimental! Use at your own risk.
 ///
 /// Aims for reduced buffer bloat and improved performance over high bandwidth-delay product
-/// networks. Based on <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html>
+/// networks. Based on <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html>
 /// equivalent to a combination of BBR and C states
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.4>
-/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.1>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.2>
 #[derive(Debug, Clone)]
 pub struct Bbr3 {
-    /// equivalent to C.SMSS The Sender Maximum Send Size in bytes. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.1>
+    /// equivalent to C.SMSS The Sender Maximum Send Size in bytes. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.2>
     /// <https://www.rfc-editor.org/rfc/rfc9000#name-datagram-size>
     smss: u64,
     /// equivalent to C.InitialCwnd: The initial congestion window set by the transport protocol
@@ -317,23 +200,23 @@ pub struct Bbr3 {
     /// equivalent to BBR.pacing_gain: The dynamic gain factor used to scale BBR.bw to produce
     /// C.pacing_rate.
     pacing_gain: f64,
-    /// default pacing gain is 1, when cruising, probing for RTT or refilling <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// default pacing gain is 1, when cruising, probing for RTT or refilling <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     default_pacing_gain: f64,
-    /// pacing gain when probing bandwidth down <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// pacing gain when probing bandwidth down <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     probe_bw_down_pacing_gain: f64,
-    /// pacing gain when probing bandwidth up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// pacing gain when probing bandwidth up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     probe_bw_up_pacing_gain: f64,
     /// equivalent to BBR.StartupPacingGain: A constant specifying the minimum gain value for
     /// calculating the pacing rate that will allow the sending rate to double each round (4 *
-    /// ln(2) ~= 2.77) BBRStartupPacingGain; used in Startup mode for BBR.pacing_gain. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.4-2>
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// ln(2) ~= 2.77) BBRStartupPacingGain; used in Startup mode for BBR.pacing_gain. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5-2>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     startup_pacing_gain: f64,
     /// equivalent to BBR.DrainPacingGain: A constant specifying the pacing gain value used in
     /// Drain mode, to attempt to drain the estimated queue at the bottleneck link in one
     /// round-trip or less. As noted in BBRDrainPacingGain, any value at or below 1 /
     /// BBRStartupCwndGain = 1 / 2 = 0.5 will theoretically achieve this. BBR uses the value
-    /// 0.5, which has been shown to offer good performance when compared with other alternatives. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.4-3>
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// 0.5, which has been shown to offer good performance when compared with other alternatives. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5-3>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     drain_pacing_gain: f64,
     /// equivalent to BBR.PacingMarginPercent: The static discount factor of 1% used to scale
     /// BBR.bw to produce C.pacing_rate.
@@ -350,12 +233,12 @@ pub struct Bbr3 {
     /// here these numbers will not be security critical as they're only used to decide when to
     /// probe the connection next.
     probe_rng: Pcg32,
-    /// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     probe_bw_up_cwnd_gain: f64,
-    /// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.1>
+    /// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
     probe_rtt_cwnd_gain: f64,
-    /// equivalent to BBR.state: The current state of a BBR flow in the BBR state machine. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.6-1>
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-3.3>
+    /// equivalent to BBR.state: The current state of a BBR flow in the BBR state machine. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.7-1>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-3.3>
     state: BbrState,
     /// equivalent to BBR.undo_state: the probing state a loss in the current recovery episode
     /// exited, to return to if the episode is declared spurious.
@@ -376,7 +259,7 @@ pub struct Bbr3 {
     /// with endpoints that follow an "ACK every other packet" delayed-ACK policy: 4 * C.SMSS.
     min_pipe_cwnd: u64,
     /// equivalent to BBR.max_bw: The windowed maximum recent bandwidth sample, obtained using the
-    /// BBR delivery rate sampling algorithm in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1>,
+    /// BBR delivery rate sampling algorithm in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1>,
     /// measured during the current or previous bandwidth probing cycle (or during Startup, if the
     /// flow is still in that state). (Part of the long-term model.)
     max_bw: f64,
@@ -465,7 +348,7 @@ pub struct Bbr3 {
     /// ever fully utilized its available bandwidth over the lifetime of the connection.
     full_bw_reached: bool,
     /// Whether the pacing rate has been re-derived from a measured RTT, as Linux BBR's
-    /// `has_seen_rtt`. BBRInitPacingRate uses C.srtt when there is one and 1ms otherwise; the
+    /// `has_seen_rtt`. InitPacingRate uses C.srtt when there is one and 1ms otherwise; the
     /// initial rate here always takes 1ms, and Startup only raises it, so an application-limited
     /// flow that never leaves Startup would keep it for its whole life.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2-6>
@@ -498,7 +381,7 @@ pub struct Bbr3 {
     /// BBR.probe_rtt_min_delay has expired and is due for a refresh with an application idle
     /// period or a transition into ProbeRTT state.
     probe_rtt_expired: bool,
-    /// equivalent to C.delivered_time: The wall clock time when C.delivered was last updated. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1.1.2.1>
+    /// equivalent to C.delivered_time: The wall clock time when C.delivered was last updated. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.1.2.1>
     delivered_time: Option<Instant>,
     /// equivalent to C.first_send_time: If packets are in flight, then this holds the send time of
     /// the packet that was most recently marked as delivered. Else, if the connection was
@@ -515,7 +398,7 @@ pub struct Bbr3 {
     /// space indexed by `SpaceId as usize`. Packet numbers are only unique and only monotonic
     /// within a space, so the queues must be kept separate for the ordered lookups below to hold.
     packets: [VecDeque<BbrPacket>; 3],
-    /// equivalent to RS: Per-ACK Rate Sample State <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.2>
+    /// equivalent to RS: Per-ACK Rate Sample State <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3>
     rs: Option<BbrRateSample>,
     /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
     /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
@@ -598,16 +481,16 @@ pub struct Bbr3 {
     drain_start_round: u64,
     /// Number of ack-eliciting packets the peer may receive before sending an immediate ACK,
     /// as requested via the QUIC ACK frequency extension. Used when computing `offload_budget`
-    /// per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.8.2>.
+    /// per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.8.2>.
     ack_eliciting_threshold: u64,
     /// `max_ack_delay` we requested the peer to use via the QUIC ACK frequency extension.
     /// Used when computing `offload_budget` per
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.8.2>.
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.8.2>.
     max_ack_delay: Duration,
 }
 
 impl Bbr3 {
-    /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.1>
+    /// equivalent to OnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
     fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
         let probe_rng: Pcg32;
         if let Some(probe_seed) = config.probe_rng_seed {
@@ -637,7 +520,7 @@ impl Bbr3 {
             .probe_bw_up_cwnd_gain
             .unwrap_or(PROBE_BW_UP_CWND_GAIN);
         let probe_rtt_cwnd_gain = config.probe_rtt_cwnd_gain.unwrap_or(PROBE_RTT_CWND_GAIN);
-        // the calculation for initial pacing rate described here <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.2-5>
+        // the calculation for initial pacing rate described here <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2-5>
         let nominal_bandwidth = initial_cwnd as f64 / 0.001;
         let pacing_rate = startup_pacing_gain * nominal_bandwidth;
         Self {
@@ -668,7 +551,7 @@ impl Bbr3 {
             round_start: true,
             next_round_delivered: 0,
             idle_restart: false,
-            min_pipe_cwnd: 4 * smss, /* 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.7-4> */
+            min_pipe_cwnd: 4 * smss, /* 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.8-4> */
             max_bw: 0.0,
             bw_shortterm: f64::INFINITY,
             undo_bw_shortterm: f64::INFINITY,
@@ -743,7 +626,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRUpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
+    /// equivalent to UpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
     fn update_model_and_state(&mut self, p: BbrPacket, newly_acked: u64, now: Instant) {
         self.update_latest_delivery_signals();
         self.update_congestion_signals(p);
@@ -758,7 +641,7 @@ impl Bbr3 {
         self.bound_bw_for_model();
     }
 
-    /// equivalent to BBRUpdateLatestDeliverySignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to UpdateLatestDeliverySignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn update_latest_delivery_signals(&mut self) {
         self.loss_round_start = false;
         if let Some(rate_sample) = self.rs {
@@ -775,7 +658,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRUpdateCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to UpdateCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn update_congestion_signals(&mut self, p: BbrPacket) {
         self.update_max_bw(p);
         if !self.loss_round_start {
@@ -785,7 +668,7 @@ impl Bbr3 {
         self.loss_in_round = false;
     }
 
-    /// equivalent to BBRUpdateMaxBw <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.5>
+    /// equivalent to UpdateMaxBw <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.5>
     fn update_max_bw(&mut self, p: BbrPacket) {
         self.update_round(p);
         if let Some(rate_sample) = self.rs
@@ -799,7 +682,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRUpdateRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1-9>
+    /// equivalent to UpdateRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1-9>
     fn update_round(&mut self, packet: BbrPacket) {
         if packet.delivered >= self.next_round_delivered {
             self.start_round();
@@ -815,7 +698,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRAdaptLowerBoundsFromCongestion <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to AdaptLowerBoundsFromCongestion <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn adapt_lower_bounds_from_congestion(&mut self) {
         match self.state {
             BbrState::ProbeBw(ProbeBwSubstate::Refill)
@@ -830,7 +713,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRInitLowerBounds <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to InitLowerBounds <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn init_lower_bounds(&mut self) {
         if self.bw_shortterm == f64::INFINITY {
             self.bw_shortterm = self.max_bw;
@@ -840,7 +723,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRLossLowerBounds <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to LossLowerBounds <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn loss_lower_bounds(&mut self) {
         // gives max of both f64
         self.bw_shortterm = [self.bw_latest, BETA * self.bw_shortterm]
@@ -853,7 +736,7 @@ impl Bbr3 {
         );
     }
 
-    /// equivalent to BBRUpdateACKAggregation <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.9>
+    /// equivalent to UpdateACKAggregation <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.9>
     fn update_ack_aggregation(&mut self, newly_acked: u64, now: Instant) {
         let interval;
         if let Some(extra_acked_interval_start) = self.extra_acked_interval_start {
@@ -885,7 +768,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRCheckFullBWReached <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.2-6>
+    /// equivalent to CheckFullBWReached <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.2-6>
     fn check_full_bw_reached(&mut self) {
         if self.full_bw_now || !self.round_start {
             return;
@@ -907,7 +790,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRCheckStartupDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.1-6>
+    /// equivalent to CheckStartupDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.1-6>
     fn check_startup_done(&mut self) {
         self.check_startup_high_loss();
         if self.state == BbrState::Startup && self.full_bw_reached {
@@ -915,7 +798,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRCheckStartupHighLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.3>
+    /// equivalent to BBRCheckStartupHighLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.3>
     fn check_startup_high_loss(&mut self) {
         if self.full_bw_reached {
             return;
@@ -979,7 +862,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBREnterDrain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.2>
+    /// equivalent to EnterDrain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.2>
     fn enter_drain(&mut self) {
         self.state = BbrState::Drain;
         self.pacing_gain = self.drain_pacing_gain;
@@ -987,7 +870,7 @@ impl Bbr3 {
         self.drain_start_round = self.round_count;
     }
 
-    /// equivalent to BBRCheckDrainDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.2>
+    /// equivalent to CheckDrainDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.2>
     ///
     /// `Inflight(1.0)` takes BBR.bw, so a loss in Drain that lowers `bw_shortterm` also lowers
     /// the level Drain must reach.
@@ -1000,13 +883,13 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBREnterProbeBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6>
+    /// equivalent to EnterProbeBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9>
     fn enter_probe_bw(&mut self, now: Instant) {
         self.cwnd_gain = self.default_cwnd_gain;
         self.start_probe_bw_down(now);
     }
 
-    /// equivalent to BBRUpdateProbeBWCyclePhase <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-6>
+    /// equivalent to UpdateProbeBWCyclePhase <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-6>
     fn update_probe_bw_cycle_phase(&mut self, newly_acked: u64, now: Instant) {
         if !self.full_bw_reached {
             return;
@@ -1038,7 +921,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRAdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
+    /// equivalent to AdaptLongTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// The probe's feedback ends once, on the first round after it stops, so later losses are not
     /// taken as probe feedback and later rounds do not age the max-bw window again.
@@ -1080,12 +963,12 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRAdvanceMaxBwFilter <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.6>
+    /// equivalent to AdvanceMaxBwFilter <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.6>
     fn advance_max_bw_filter(&mut self) {
         self.cycle_count = self.cycle_count.saturating_add(1);
     }
 
-    /// equivalent to BBRIsTimeToProbeBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-6>
+    /// equivalent to BBRIsTimeToProbeBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-6>
     fn maybe_enter_probe_bw_refill(&mut self, now: Instant) -> bool {
         if self.has_elapsed_in_phase(self.bw_probe_wait, now)
             || self.is_reno_coexistence_probe_time()
@@ -1096,7 +979,7 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRHasElapsedInPhase <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// equivalent to HasElapsedInPhase <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-8>
     fn has_elapsed_in_phase(&mut self, interval: Duration, now: Instant) -> bool {
         if let Some(cycle_stamp) = self.cycle_stamp {
             now > cycle_stamp.checked_add(interval).unwrap_or(cycle_stamp)
@@ -1105,7 +988,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRIsRenoCoexistenceProbeTime <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-6>
+    /// equivalent to IsRenoCoexistenceProbeTime <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-6>
     ///
     /// `reno_bdp = min(BBR.bdp, C.cwnd)` is a packet count in the spec, which quotes the BDPs it
     /// bounds against in packets ("25Mbps * 30 ms / (1514 bytes) ~= 62 packets"), so convert from
@@ -1121,7 +1004,7 @@ impl Bbr3 {
         self.rounds_since_bw_probe >= rounds
     }
 
-    /// equivalent to BBRStartProbeBW_REFILL <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-4>
+    /// equivalent to StartProbeBW_REFILL <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-4>
     fn start_probe_bw_refill(&mut self) {
         self.reset_short_term_model();
         self.bw_probe_up_rounds = 0;
@@ -1134,7 +1017,7 @@ impl Bbr3 {
         self.state = BbrState::ProbeBw(ProbeBwSubstate::Refill);
     }
 
-    /// equivalent to BBRIsTimeToCruise <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9>
+    /// equivalent to IsTimeToCruise <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9>
     ///
     /// The one `Inflight` the draft computes from BBR.max_bw rather than BBR.bw.
     fn maybe_update_budget_and_time_to_cruise(&mut self) -> bool {
@@ -1155,7 +1038,7 @@ impl Bbr3 {
         self.quantization_budget(inflight_cap)
     }
 
-    /// equivalent to BBRIsTimeToGoDown <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-6>
+    /// equivalent to BBRIsTimeToGoDown <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-6>
     fn maybe_go_down(&mut self, newly_acked: u64) -> bool {
         // precautionary bandwidth probing: deceleration
         // Because `on_end_acks` receives post-ACK `in_flight` (after subtracting `newly_acked`
@@ -1176,7 +1059,7 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
+    /// equivalent to ProbeInflightLongtermUpward <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// Growing in whole packets lets the cwnd catch up between increments, so PROBE_UP sees the
     /// cwnd reach `inflight_longterm` and keeps probing while that bound is what limits it. Once
@@ -1190,7 +1073,9 @@ impl Bbr3 {
         if self.bw_probe_up_acked >= self.probe_up_acked_per_inc && self.probe_up_acked_per_inc > 0
         {
             let delta = self.bw_probe_up_acked / self.probe_up_acked_per_inc;
-            self.bw_probe_up_acked = self.bw_probe_up_acked.saturating_sub(delta * self.probe_up_acked_per_inc);
+            self.bw_probe_up_acked = self
+                .bw_probe_up_acked
+                .saturating_sub(delta * self.probe_up_acked_per_inc);
             self.inflight_longterm = self.inflight_longterm.saturating_add(delta * self.smss);
         }
         if self.round_start {
@@ -1198,7 +1083,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRUpdateMinRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>
+    /// equivalent to UpdateMinRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>
     ///
     /// The draft stamps `probe_rtt_min_stamp` at connection init, so the first ProbeRTT falls due
     /// one `probe_rtt_interval` later. Before the first ack there is no RTT sample to stamp, so an
@@ -1237,7 +1122,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
+    /// equivalent to CheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3-4>
     fn check_probe_rtt(&mut self, now: Instant) {
         if self.state != BbrState::ProbeRtt && self.probe_rtt_expired && !self.idle_restart {
             // A probe cut short here still owes its max-bw window advance, which the draft never
@@ -1269,7 +1154,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRHandleProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
+    /// equivalent to HandleProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3-4>
     fn handle_probe_rtt(&mut self, now: Instant) {
         // Packets sent at the reduced ProbeRTT window do not measure the path's capacity, whether
         // or not inflight fills that window, so this skips the starvation check's cwnd guard.
@@ -1289,7 +1174,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBREnterProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
+    /// equivalent to EnterProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3-4>
     fn enter_probe_rtt(&mut self) {
         self.state = BbrState::ProbeRtt;
         self.prev_probe_precautionary = false;
@@ -1297,7 +1182,7 @@ impl Bbr3 {
         self.cwnd_gain = self.probe_rtt_cwnd_gain;
     }
 
-    /// equivalent to BBRSaveCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.4-13>
+    /// equivalent to SaveCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.4-13>
     fn save_cwnd(&mut self) {
         if !self.in_recovery && self.state != BbrState::ProbeRtt {
             self.prior_cwnd = self.cwnd;
@@ -1306,7 +1191,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRAdvanceLatestDeliverySignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to AdvanceLatestDeliverySignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn advance_latest_delivery_signals(&mut self) {
         if self.loss_round_start
             && let Some(rate_sample) = self.rs
@@ -1316,7 +1201,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRBoundBWForModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to BoundBWForModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn bound_bw_for_model(&mut self) {
         // gives min of both f64
         self.bw = [self.max_bw, self.bw_shortterm]
@@ -1325,7 +1210,7 @@ impl Bbr3 {
             .fold(f64::NAN, f64::min);
     }
 
-    /// equivalent to BBRStartProbeBW_UP <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-4>
+    /// equivalent to StartProbeBW_UP <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-4>
     fn start_probe_bw_up(&mut self) {
         self.ack_phase = AckPhase::ProbeStarting;
         self.start_round();
@@ -1339,14 +1224,14 @@ impl Bbr3 {
         self.raise_inflight_long_term_slope();
     }
 
-    /// equivalent to BBRResetFullBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.2-4>
+    /// equivalent to ResetFullBW <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.2-4>
     fn reset_full_bw(&mut self) {
         self.full_bw = 0.0;
         self.full_bw_count = 0;
         self.full_bw_now = false;
     }
 
-    /// equivalent to BBRRaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
+    /// equivalent to RaiseInflightLongtermSlope <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     fn raise_inflight_long_term_slope(&mut self) {
         let growth_this_round = 1u64
             .checked_shl(self.bw_probe_up_rounds)
@@ -1356,7 +1241,7 @@ impl Bbr3 {
         self.probe_up_acked_per_inc = Ord::max(self.cwnd / growth_this_round, self.smss);
     }
 
-    /// equivalent to BBRHandleRestartFromIdle <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.4.1>
+    /// equivalent to BBRHandleRestartFromIdle <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.4.1>
     fn handle_restart_from_idle(&mut self, now: Instant) {
         if self.inflight == 0 && self.app_limited != 0 {
             self.idle_restart = true;
@@ -1375,7 +1260,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRCheckProbeRTTDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
+    /// equivalent to CheckProbeRTTDone <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3-4>
     fn check_probe_rtt_done(&mut self, now: Instant) {
         if let Some(probe_rtt_done_stamp) = self.probe_rtt_done_stamp
             && now > probe_rtt_done_stamp
@@ -1386,12 +1271,12 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRRestoreCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.4-13>
+    /// equivalent to RestoreCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.4-13>
     fn restore_cwnd(&mut self) {
         self.cwnd = Ord::max(self.cwnd, self.prior_cwnd);
     }
 
-    /// equivalent to BBRExitProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.4>
+    /// equivalent to ExitProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.4>
     fn exit_probe_rtt(&mut self, now: Instant) {
         self.reset_short_term_model();
         if self.full_bw_reached {
@@ -1402,28 +1287,28 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRStartProbeBW_CRUISE <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.4-4>
+    /// equivalent to StartProbeBW_CRUISE <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.4-4>
     fn start_probe_bw_cruise(&mut self) {
         self.state = BbrState::ProbeBw(ProbeBwSubstate::Cruise);
         self.pacing_gain = self.default_pacing_gain;
         self.cwnd_gain = self.default_cwnd_gain;
     }
 
-    /// equivalent to BBREnterStartup <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.1-3>
+    /// equivalent to EnterStartup <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.1-3>
     fn enter_startup(&mut self) {
         self.state = BbrState::Startup;
         self.pacing_gain = self.startup_pacing_gain;
         self.cwnd_gain = self.default_cwnd_gain;
     }
 
-    /// equivalent to BBRUpdateControlParameters <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.2.3>
+    /// equivalent to UpdateControlParameters <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
     fn update_control_parameters(&mut self, newly_acked: u64) {
         self.set_pacing_rate();
         self.set_send_quantum();
         self.set_cwnd(newly_acked);
     }
 
-    /// equivalent to BBRSetCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.6>
+    /// equivalent to SetCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.6>
     fn set_cwnd(&mut self, newly_acked: u64) {
         self.update_max_inflight();
         if self.full_bw_reached {
@@ -1436,7 +1321,7 @@ impl Bbr3 {
         self.bound_cwnd_for_model();
     }
 
-    /// equivalent to BBRUpdateMaxInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2>
+    /// equivalent to UpdateMaxInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2>
     ///
     /// Sized from BBR.bw, so the short-term bandwidth bound caps the window as well as the
     /// pacing rate. As the last BDP computed on each ACK, it also leaves BBR.bdp at
@@ -1447,7 +1332,7 @@ impl Bbr3 {
         self.max_inflight = self.quantization_budget(inflight_cap);
     }
 
-    /// equivalent to BBRQuantizationBudget <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
+    /// equivalent to QuantizationBudget <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2-2>
     fn quantization_budget(&mut self, inflight_cap: u64) -> u64 {
         self.update_offload_budget();
         let mut inflight_cap = Ord::max(inflight_cap, self.offload_budget);
@@ -1458,8 +1343,8 @@ impl Bbr3 {
         inflight_cap
     }
 
-    /// equivalent to BBRUpdateOffloadBudget for QUIC per
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.8.2>.
+    /// equivalent to UpdateOffloadBudget for QUIC per
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.8.2>.
     ///
     /// The delayed-ACK term accounts for the QUIC ACK frequency extension:
     /// `min(Ack-Eliciting Threshold, Requested Max Ack Delay * BBR.max_bw)`.
@@ -1476,21 +1361,21 @@ impl Bbr3 {
         self.offload_budget = base.saturating_add(delayed_ack_term);
     }
 
-    /// equivalent to BBRBoundCwndForProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.5-1>
+    /// equivalent to BoundCwndForProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.5-1>
     fn bound_cwnd_for_probe_rtt(&mut self) {
         if self.state == BbrState::ProbeRtt {
             self.cwnd = Ord::min(self.cwnd, self.probe_rtt_cwnd());
         }
     }
 
-    /// equivalent to BBRProbeRTTCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.5-1>
+    /// equivalent to ProbeRTTCwnd <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.5-1>
     fn probe_rtt_cwnd(&mut self) -> u64 {
         let mut probe_rtt_cwnd = self.bdp_multiple(self.bw, self.probe_rtt_cwnd_gain);
         probe_rtt_cwnd = Ord::max(probe_rtt_cwnd, self.min_pipe_cwnd);
         probe_rtt_cwnd
     }
 
-    /// equivalent to BBRBDPMultiple <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
+    /// equivalent to BDPMultiple <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2-2>
     fn bdp_multiple(&mut self, bw: f64, gain: f64) -> u64 {
         if self.min_rtt == Duration::from_secs(u64::MAX) {
             return self.initial_cwnd;
@@ -1499,7 +1384,7 @@ impl Bbr3 {
         (gain * self.bdp as f64) as u64
     }
 
-    /// equivalent to BBRBoundCwndForModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.7>
+    /// equivalent to BoundCwndForModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.7>
     fn bound_cwnd_for_model(&mut self) {
         let mut cap = u64::MAX;
         match self.state {
@@ -1519,7 +1404,7 @@ impl Bbr3 {
         self.cwnd = Ord::min(self.cwnd, cap);
     }
 
-    /// equivalent to BBRInflightWithHeadroom <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// equivalent to BBRInflightWithHeadroom <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-8>
     fn inflight_with_headroom(&self) -> u64 {
         if self.inflight_longterm == u64::MAX {
             return u64::MAX;
@@ -1532,12 +1417,12 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRSetPacingRate <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.2-7>
+    /// equivalent to SetPacingRate <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2-7>
     fn set_pacing_rate(&mut self) {
         self.set_pacing_rate_with_gain(self.pacing_gain);
     }
 
-    /// equivalent to BBRSetPacingRateWithGain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.2-7>
+    /// equivalent to SetPacingRateWithGain <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2-7>
     fn set_pacing_rate_with_gain(&mut self, gain: f64) {
         if !self.has_seen_rtt && self.min_rtt != Duration::from_secs(u64::MAX) {
             self.init_pacing_rate_from_rtt();
@@ -1548,7 +1433,7 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRInitPacingRate once an RTT is measured, as Linux BBR's
+    /// equivalent to InitPacingRate once an RTT is measured, as Linux BBR's
     /// `bbr_init_pacing_rate_from_rtt`. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2-6>
     ///
     /// BBR's own first RTT sample stands in for SRTT: the transport updates its estimator only
@@ -1560,7 +1445,7 @@ impl Bbr3 {
         self.pacing_rate = self.startup_pacing_gain * self.initial_cwnd as f64 / rtt.as_secs_f64();
     }
 
-    /// equivalent to BBRSetSendQuantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
+    /// equivalent to SetSendQuantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
     fn set_send_quantum(&mut self) {
         // C.pacing_rate is in bytes/sec, so multiplying by 1ms is dividing by 1000.
         let mut quantum = (self.pacing_rate / 1000.0) as u64;
@@ -1569,7 +1454,7 @@ impl Bbr3 {
         self.send_quantum = quantum;
     }
 
-    /// equivalent to IsNewestPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1.2.3-3>
+    /// equivalent to IsNewestPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3-3>
     ///
     /// The `P.packet_id > RS.last_acked_packet_id` tie-break only orders two packets of the same
     /// space, since every space numbers independently from zero.
@@ -1589,7 +1474,7 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRHandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
+    /// equivalent to HandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-11>
     fn process_lost_packet(&mut self, packet_index: usize, space: SpaceId, now: Instant) {
         let p = self.packets[space as usize][packet_index];
         self.enter_recovery(now, p.send_time);
@@ -1612,7 +1497,7 @@ impl Bbr3 {
         self.packets[space as usize].remove(packet_index);
     }
 
-    /// equivalent to BBRNoteLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
+    /// equivalent to NoteLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-11>
     ///
     /// `loss_events_in_round` counts discontiguous lost sequence ranges, not lost packets, so a
     /// contiguous burst of packet numbers is one event. Losses are reported in ascending packet
@@ -1651,7 +1536,7 @@ impl Bbr3 {
         self.undo_inflight_longterm = self.inflight_longterm;
     }
 
-    /// equivalent to IsInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-1>
+    /// equivalent to IsInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-1>
     fn is_inflight_too_high(&self) -> bool {
         if let Some(rate_sample) = self.rs {
             return rate_sample.lost as f64 > rate_sample.tx_in_flight as f64 * LOSS_THRESH;
@@ -1659,7 +1544,7 @@ impl Bbr3 {
         false
     }
 
-    /// equivalent to BBRInflightAtLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-11>
+    /// equivalent to InflightAtLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-11>
     /// We check at what prefix of packet did losses exceed `loss_thresh`
     fn inflight_at_loss(&mut self, packet_size: u64) -> u64 {
         let Some(rate_sample) = self.rs else {
@@ -1671,7 +1556,7 @@ impl Bbr3 {
         (inflight_prev + lost_prefix) as u64
     }
 
-    /// equivalent to BBRHandleInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-1>
+    /// equivalent to BBRHandleInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-1>
     fn handle_inflight_too_high(&mut self, now: Instant) {
         self.bw_probe_samples = false;
         self.prev_probe_too_high = true;
@@ -1691,18 +1576,18 @@ impl Bbr3 {
         }
     }
 
-    /// equivalent to BBRTargetInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-6>
+    /// equivalent to TargetInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-6>
     fn target_inflight(&self) -> u64 {
         Ord::min(self.bdp, self.cwnd)
     }
 
-    /// equivalent to BBRResetShortTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to ResetShortTermModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn reset_short_term_model(&mut self) {
         self.bw_shortterm = f64::INFINITY;
         self.inflight_shortterm = u64::MAX;
     }
 
-    /// equivalent to BBRStartProbeBW_DOWN <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-4>
+    /// equivalent to StartProbeBW_DOWN <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-4>
     fn start_probe_bw_down(&mut self, now: Instant) {
         self.reset_congestion_signals();
         self.probe_up_acked_per_inc = u64::MAX;
@@ -1715,14 +1600,14 @@ impl Bbr3 {
         self.state = BbrState::ProbeBw(ProbeBwSubstate::Down);
     }
 
-    /// equivalent to BBRResetCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// equivalent to ResetCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     fn reset_congestion_signals(&mut self) {
         self.loss_in_round = false;
         self.bw_latest = 0.0;
         self.inflight_latest = 0;
     }
 
-    /// equivalent to BBRPickProbeWait <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-6>
+    /// equivalent to PickProbeWait <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-6>
     fn pick_probe_wait(&mut self) {
         // 0 or 1
         self.rounds_since_bw_probe = self.probe_rng.random_bool(0.5) as u64;
@@ -1733,14 +1618,14 @@ impl Bbr3 {
         self.reno_rounds_bound = RENO_ROUNDS_BOUNDS[self.probe_rng.random_bool(0.5) as usize];
     }
 
-    /// equivalent to BBRStartRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1-9>
+    /// equivalent to StartRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1-9>
     fn start_round(&mut self) {
         self.next_round_delivered = self.delivered;
     }
 }
 
 impl Controller for Bbr3 {
-    /// equivalent to BBROnTransmit and OnPacketSent: checks for a restart from idle, then takes
+    /// equivalent to OnTransmit and OnPacketSent: checks for a restart from idle, then takes
     /// the packet's delivery snapshot.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.2>
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.2-4>
@@ -1832,7 +1717,7 @@ impl Controller for Bbr3 {
         });
     }
 
-    /// equivalent to GenerateRateSample, BBRUpdateModelAndState, and BBRUpdateControlParameters
+    /// equivalent to GenerateRateSample, UpdateModelAndState, and UpdateControlParameters
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
     fn on_end_acks(
         &mut self,
@@ -1914,7 +1799,7 @@ impl Controller for Bbr3 {
         }
     }
 
-    /// equivalent to the per-loss steps, which call BBRHandleLostPacket
+    /// equivalent to the per-loss steps, which call HandleLostPacket
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.4>
     fn on_packet_lost(
         &mut self,
@@ -1984,8 +1869,8 @@ impl Controller for Bbr3 {
         self.set_cwnd(0);
     }
 
-    /// Records the ACK frequency parameters BBRUpdateOffloadBudget uses for QUIC.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.8.2>
+    /// Records the ACK frequency parameters UpdateOffloadBudget uses for QUIC.
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.8.2>
     fn on_ack_frequency_update(
         &mut self,
         ack_eliciting_threshold: u64,
@@ -2091,6 +1976,123 @@ impl ControllerFactory for Bbr3Config {
         Box::new(Bbr3::new(self, current_mtu))
     }
 }
+
+/// equivalent to BBR.MaxBwFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.11>
+const MAX_BW_FILTER_LEN: usize = 2;
+
+/// equivalent to BBR.ExtraAckedFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.12>
+const EXTRA_ACKED_FILTER_LEN: usize = 10;
+
+/// safety mechanism to flag packets as stale within our tracking VecDeque. rounds refer to <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>.
+/// The value of 10 rounds is picked because normally after max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity) <https://datatracker.ietf.org/doc/html/rfc9002#section-6.1.2>
+/// the packet should have been declared lost already, this is just to guarantee that the VecDeque
+/// doesn't grow indefinitely.
+const ROUND_COUNT_WINDOW: u64 = 10;
+
+/// the minimum for the maximum datagram size <https://datatracker.ietf.org/doc/html/rfc9000#section-14>
+const MIN_MAX_DATAGRAM_SIZE: u16 = 1200;
+
+/// the maximum for the maximum datagram size <https://datatracker.ietf.org/doc/html/rfc9000#section-18.2>
+const MAX_DATAGRAM_SIZE: u64 = 65527;
+
+/// 64 KBytes in bytes
+/// one of the default high values for `set_send_quantum`
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
+const HIGH_PACE_MAX_QUANTUM: u64 = 64 * 1024;
+
+/// equivalent to BBR.StartupPacingGain: A constant specifying the minimum gain value for
+/// calculating the pacing rate that will allow the sending rate to double each round (4 * ln(2) ~=
+/// 2.77) BBRStartupPacingGain; used in Startup mode for BBR.pacing_gain. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5-2>
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
+const STARTUP_PACING_GAIN: f64 = 2.773;
+
+/// default pacing gain is 1, when cruising, probing for RTT or refilling <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
+const DEFAULT_PACING_GAIN: f64 = 1.0;
+
+/// pacing gain when probing bandwidth down <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
+const PROBE_BW_DOWN_PACING_GAIN: f64 = 0.9;
+
+/// pacing gain when probing bandwidth up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
+const PROBE_BW_UP_PACING_GAIN: f64 = 1.25;
+
+/// equivalent to BBR.PacingMarginPercent: The static discount factor of 1% used to scale BBR.bw to
+/// produce C.pacing_rate.
+const PACING_MARGIN_PERCENT: f64 = 1.0;
+
+/// equivalent to BBR.DefaultCwndGain: A constant specifying the minimum gain value that allows the
+/// sending rate to double each round (2) BBRStartupCwndGain. Used by default in most phases for
+/// BBR.cwnd_gain.
+const DEFAULT_CWND_GAIN: f64 = 2.0;
+
+/// equivalent to BBR.DrainPacingGain: A constant specifying the pacing gain value used in Drain
+/// mode, to attempt to drain the estimated queue at the bottleneck link in one round-trip or less.
+/// As noted in BBRDrainPacingGain, any value at or below 1 / BBRStartupCwndGain = 1 / 2 = 0.5 will
+/// theoretically achieve this. BBR uses the value 0.5, which has been shown to offer good
+/// performance when compared with other alternatives. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.5>
+/// <https://github.com/google/bbr/blob/master/Documentation/startup/gain/analysis/bbr_drain_gain.pdf>
+const DRAIN_PACING_GAIN: f64 = 1.0 / DEFAULT_CWND_GAIN;
+
+/// cwnd gain used when probing up <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
+const PROBE_BW_UP_CWND_GAIN: f64 = 2.25;
+
+/// cwnd gain used when probing RTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.1>
+const PROBE_RTT_CWND_GAIN: f64 = 0.5;
+
+/// equivalent to BBR.ProbeRTTDuration: A constant specifying the minimum duration for which
+/// ProbeRTT state holds C.inflight to BBR.MinPipeCwnd or fewer packets: 200 ms.
+const PROBE_RTT_DURATION_MS: u64 = 200;
+
+/// equivalent to BBR.ProbeRTTInterval: A constant specifying the minimum time interval between
+/// ProbeRTT states: 5 secs.
+const PROBE_RTT_INTERVAL_SEC: u64 = 5;
+
+/// equivalent to BBR.LossThresh: A constant specifying the maximum tolerated per-round-trip packet
+/// loss rate when probing for bandwidth (the default is 2%).
+const LOSS_THRESH: f64 = 0.02;
+
+/// equivalent to BBR.Beta: A constant specifying the default multiplicative decrease to make upon
+/// each round trip during which the connection detects packet loss (the value is 0.7).
+const BETA: f64 = 0.7;
+
+/// equivalent to BBR.Headroom: A constant specifying the multiplicative factor to apply to
+/// BBR.inflight_longterm when calculating a volume of free headroom to try to leave unused in the
+/// path (e.g. free space in the bottleneck buffer or free time slots in the bottleneck link) that
+/// can be used by cross traffic (the value is 0.15).
+const HEADROOM: f64 = 0.15;
+
+/// equivalent to BBR.MinRTTFilterLen: A constant specifying the length of the BBR.min_rtt min
+/// filter window, BBR.MinRTTFilterLen is 10 secs.
+const MIN_RTT_FILTER_LEN: u64 = 10;
+
+/// multiplier used to check growth when validating if the full bandwidth has been reached
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.2-6>
+const FULL_BW_GROWTH: f64 = 1.25;
+
+/// maximum number of rounds needed before we consider that the pipe is full <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.2-6>
+const MAX_FULL_BW_COUNT: u64 = 3;
+
+/// equivalent to BBRStartupFullLossCnt: the minimum number of discontiguous loss
+/// events observed within a single round trip before the STARTUP high-loss
+/// estimator is allowed to exit STARTUP.
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.3>
+const STARTUP_FULL_LOSS_CNT: u64 = 6;
+
+/// when setting `bw_probe_up_rounds` when raising our inflight long term slope we don't go above
+/// this <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-8>
+const MAX_LONG_TERM_PROBE_UP_ROUNDS: u32 = 30;
+
+/// equivalent to T_reno_bound: the two candidate values for the round-trip bound used when
+/// deciding to coexist with Reno / CUBIC. The spec picks randomly between them
+/// (`T_reno_bound = pick_randomly_either({62, 63})`) for better mixing and fairness
+/// convergence <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.2>
+const RENO_ROUNDS_BOUNDS: [u64; 2] = [62, 63];
+
+/// minimum amount of time to wait before probing again <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-5>
+const MIN_PROBE_WAIT_MS: u64 = 2000;
+
+/// when waiting before probing again we add up to one second of added wait time
+/// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-5>
+const MAX_ADDED_PROBE_WAIT_MS: u64 = 1000;
 
 #[cfg(test)]
 mod test {
@@ -2868,7 +2870,7 @@ mod test {
 
     /// A.5: Exiting PROBE_UP on a bandwidth plateau.
     /// equivalent to BBRIsTimeToGoDown:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-6>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-6>
     ///
     /// Same infinite-buffer simulator as A.1/A.3 (constant `BW`, constant `RTT`,
     /// no loss), driven STARTUP -> DRAIN -> PROBE_BW until PROBE_BW cycles into
@@ -2945,7 +2947,7 @@ mod test {
 
     /// A.6: Exiting PROBE_UP on loss when application-limited.
     /// equivalent to BBRHandleInflightTooHigh:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-1>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-1>
     ///
     /// NOTE: the loss-driven PROBE_UP exit runs through `handle_inflight_too_high`
     /// (BBRHandleInflightTooHigh), reached per-lost-packet from
@@ -3399,8 +3401,8 @@ mod test {
     }
 
     /// A.8: Exiting PROBE_DOWN on inflight.
-    /// equivalent to BBRIsTimeToCruise:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-8>
+    /// equivalent to IsTimeToCruise:
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-8>
     ///
     /// Same infinite-buffer simulator as A.5 (constant `BW`, constant `RTT`, no
     /// loss, sender always has data), driven STARTUP -> DRAIN -> PROBE_BW until
@@ -3416,7 +3418,7 @@ mod test {
     /// `maybe_enter_probe_bw_refill` (still false: `bw_probe_wait` is 2-3s and
     /// `rounds_since_bw_probe` was reset at down entry, so neither the elapsed-time
     /// nor the Reno-coexistence trigger fires within the short drain) and then
-    /// `maybe_update_budget_and_time_to_cruise` (`BBRIsTimeToCruise`). The latter
+    /// `maybe_update_budget_and_time_to_cruise` (`IsTimeToCruise`). The latter
     /// returns true only once `C.inflight` has fallen to <= both
     /// `BBRInflightWithHeadroom()` and `BBRInflight(1.0)`, at which point
     /// `start_probe_bw_cruise` moves PROBE_DOWN -> PROBE_CRUISE.
@@ -3533,7 +3535,7 @@ mod test {
             cruise_gain, bbr.default_pacing_gain,
             "PROBE_CRUISE pacing_gain should be DefaultPacingGain"
         );
-        // BBRIsTimeToCruise held: C.inflight fell to <= BBRInflight(1.0), the binding
+        // IsTimeToCruise held: C.inflight fell to <= BBRInflight(1.0), the binding
         // threshold. The queue only shrinks, so the post-edge recompute still holds.
         // (Headroom is unbounded here, inflight_longterm == u64::MAX, so it never binds; cf. A.9.)
         assert!(
@@ -3546,7 +3548,7 @@ mod test {
     /// A.9: Exiting PROBE_DOWN after max time, direct to PROBE_REFILL, bypassing
     /// PROBE_CRUISE.
     /// equivalent to BBRIsTimeToProbeBW:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.5.3-6>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.8.3-6>
     ///
     /// Drives the same single-bottleneck simulator as A.8 through
     /// STARTUP -> DRAIN -> PROBE_BW and on into the PROBE_DOWN that PROBE_UP cycles
@@ -3563,7 +3565,7 @@ mod test {
     /// `probe_rtt_min_stamp` so the periodic min-RTT re-probe (PROBE_RTT, cf. A.10)
     /// cannot preempt, advances `now` just past `cycle_stamp + bw_probe_wait`, and
     /// drives `update_probe_bw_cycle_phase`. Because that function checks
-    /// `BBRIsTimeToProbeBW` (the timer) *before* `BBRIsTimeToCruise`, and `C.inflight`
+    /// `BBRIsTimeToProbeBW` (the timer) *before* `IsTimeToCruise`, and `C.inflight`
     /// is above the cruise threshold, the flow moves in a single cycle step DIRECTLY
     /// from PROBE_DOWN to PROBE_REFILL, bypassing PROBE_CRUISE. The Reno-coexistence
     /// disjunct is not the trigger: `rounds_since_bw_probe` was reset at down entry and
@@ -3642,7 +3644,7 @@ mod test {
         );
 
         // The standing PROBE_UP queue keeps C.inflight above the cruise threshold
-        // BBRInflight(1.0), so BBRIsTimeToCruise is false and PROBE_CRUISE is not an
+        // BBRInflight(1.0), so IsTimeToCruise is false and PROBE_CRUISE is not an
         // available exit: the state A.9 sets up by decreasing bandwidth 10% on
         // PROBE_DOWN entry so inflight never drops below the threshold.
         let cruise_threshold = bbr.get_inflight(bbr.max_bw, 1.0);
@@ -3672,7 +3674,7 @@ mod test {
 
         // A single cycle step took PROBE_DOWN straight to PROBE_REFILL, bypassing
         // PROBE_CRUISE, because update_probe_bw_cycle_phase checks BBRIsTimeToProbeBW
-        // (the timer) before BBRIsTimeToCruise. Refill resets pacing_gain to
+        // (the timer) before IsTimeToCruise. Refill resets pacing_gain to
         // DefaultPacingGain.
         assert_eq!(
             bbr.state,
@@ -3686,8 +3688,8 @@ mod test {
     }
 
     /// A.10: Entering and exiting PROBE_RTT.
-    /// equivalent to BBRCheckProbeRTT / BBRHandleProbeRTT / BBRExitProbeRTT:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3>
+    /// equivalent to CheckProbeRTT / HandleProbeRTT / ExitProbeRTT:
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>
     ///
     /// Same infinite-buffer FIFO simulator as A.1/A.8 (constant link rate,
     /// constant propagation delay), driven STARTUP -> DRAIN -> PROBE_BW and then
@@ -3709,7 +3711,7 @@ mod test {
     /// On entry `check_probe_rtt` calls `enter_probe_rtt` (state -> ProbeRtt,
     /// `cwnd_gain` -> `ProbeRTTCwndGain` = 0.5), saves the cwnd, clears
     /// `probe_rtt_done_stamp`, and starts a round. `bound_cwnd_for_probe_rtt` then
-    /// caps `C.cwnd` at `BBRProbeRTTCwnd` (~0.5·BDP), so the sender stalls until
+    /// caps `C.cwnd` at `ProbeRTTCwnd` (~0.5·BDP), so the sender stalls until
     /// `C.inflight` drains below that cap. When it does, `handle_probe_rtt` stamps
     /// `probe_rtt_done_stamp = now + ProbeRTTDuration` (200 ms) and starts a fresh
     /// round; PROBE_RTT then holds until *both* one packet-timed round has elapsed
@@ -3879,8 +3881,8 @@ mod test {
     }
 
     /// A.11: Skipping PROBE_RTT due to application-limited (restart-from-idle) sending.
-    /// equivalent to BBRHandleRestartFromIdle / BBRCheckProbeRTT:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.4.1>
+    /// equivalent to BBRHandleRestartFromIdle / CheckProbeRTT:
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.4.1>
     ///
     /// Same infinite-buffer FIFO simulator as A.10 (constant link rate, constant
     /// propagation delay), driven STARTUP -> DRAIN -> PROBE_BW. Then the
@@ -4148,9 +4150,9 @@ mod test {
     }
 
     /// A.12: Achieving expected STARTUP bandwidth on a link with ACK aggregation.
-    /// equivalent to BBRUpdateACKAggregation / BBRUpdateMaxInflight:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.9>
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2>
+    /// equivalent to UpdateACKAggregation / UpdateMaxInflight:
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.9>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2>
     ///
     /// Same constant-rate FIFO simulator as A.1, with one change: the path
     /// aggregates ACKs. Instead of each served packet being acked as soon as it clears
@@ -4175,8 +4177,8 @@ mod test {
     ///     span, the sampled rate is capped at the send rate and `BBR.max_bw` tracks the true
     ///     bottleneck `BW` rather than the instantaneous burst rate. Asserted via `max_bw` staying
     ///     within a few percent of `BW`.
-    ///  2. `BBRUpdateACKAggregation` must estimate the excess data delivered by aggregation
-    ///     (`BBR.extra_acked`) and `BBRUpdateMaxInflight` must add it to the cwnd budget, so that
+    ///  2. `UpdateACKAggregation` must estimate the excess data delivered by aggregation
+    ///     (`BBR.extra_acked`) and `UpdateMaxInflight` must add it to the cwnd budget, so that
     ///     inflight does not throttle throughput on the bursty path. With STARTUP's `cwnd_gain` of
     ///     2, `max_inflight = 2*BDP + extra_acked`, so a positive `extra_acked` drives `C.cwnd`
     ///     above `2 * BDP`. Asserted directly.
@@ -4339,12 +4341,12 @@ mod test {
             max_burst > 1,
             "harness should have produced aggregated ACK bursts, max burst was {max_burst}"
         );
-        // BBRUpdateACKAggregation estimated a positive excess from the bursts.
+        // UpdateACKAggregation estimated a positive excess from the bursts.
         assert!(
             max_extra_acked > 0,
             "extra_acked should be positive on an aggregating path"
         );
-        // The extra_acked budget lifted the cwnd above 2*BDP (BBRUpdateMaxInflight adds
+        // The extra_acked budget lifted the cwnd above 2*BDP (UpdateMaxInflight adds
         // extra_acked on top of cwnd_gain*BDP, cwnd_gain being 2 in STARTUP).
         assert!(
             cwnd_exceeded_2bdp,
@@ -4374,9 +4376,9 @@ mod test {
     }
 
     /// A.13: Achieving expected cruise bandwidth on a link with ACK aggregation.
-    /// equivalent to BBRUpdateACKAggregation / BBRUpdateMaxInflight:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.9>
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2>
+    /// equivalent to UpdateACKAggregation / UpdateMaxInflight:
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.9>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2>
     ///
     /// The aggregation-in-STARTUP counterpart is A.12; this covers the same excess-data
     /// mechanism in the steady-state PROBE_BW cruise phase, where the aggregation estimate
@@ -4397,10 +4399,10 @@ mod test {
     /// packet, all stamped with the same ack instant, followed by one `on_end_acks` carrying
     /// the burst's largest packet number.
     ///
-    /// Once `full_bw_reached` (true throughout PROBE_BW), `BBRUpdateACKAggregation` tracks the
+    /// Once `full_bw_reached` (true throughout PROBE_BW), `UpdateACKAggregation` tracks the
     /// per-round excess in a windowed max filter over the last `BBR.ExtraAckedFilterLen`
     /// (`EXTRA_ACKED_FILTER_LEN`, 10) rounds and sets `BBR.extra_acked` to that max, unlike
-    /// STARTUP, which just remembers one round (A.12). `BBRUpdateMaxInflight` then adds
+    /// STARTUP, which just remembers one round (A.12). `UpdateMaxInflight` then adds
     /// `extra_acked` on top of `cwnd_gain*BDP` (cruise `cwnd_gain` is `DefaultCwndGain` = 2),
     /// so `C.cwnd` is lifted above `2*BDP`.
     ///
@@ -4470,7 +4472,7 @@ mod test {
         // extra_acked must be sourced from the windowed max filter on every cruise ack.
         let mut extra_acked_is_filter_max = true;
         // Largest amount by which C.cwnd sat above the un-augmented cruise budget (2*BDP),
-        // i.e. the headroom BBRUpdateMaxInflight added from extra_acked.
+        // i.e. the headroom UpdateMaxInflight added from extra_acked.
         let mut max_cwnd_augmentation: u64 = 0;
         // The sender was never cwnd-blocked in cruise (cwnd stayed strictly above inflight on
         // every ack); a stall would show up as inflight catching the cwnd cap.
@@ -4561,7 +4563,7 @@ mod test {
 
                     let ea = bbr.extra_acked;
                     // extra_acked is fed from the windowed max filter (full_bw_reached arm of
-                    // BBRUpdateACKAggregation), not the raw per-round excess.
+                    // UpdateACKAggregation), not the raw per-round excess.
                     if ea != bbr.extra_acked_filter.get_max() {
                         extra_acked_is_filter_max = false;
                     }
@@ -4579,7 +4581,7 @@ mod test {
                     // bbr.bdp is refreshed to max_bw*min_rtt inside update_max_inflight on
                     // every set_cwnd; 2*bdp is the un-augmented cruise budget (cwnd_gain 2), so
                     // any excess of cwnd over 2*bdp is exactly the extra_acked headroom
-                    // BBRUpdateMaxInflight added.
+                    // UpdateMaxInflight added.
                     if bbr.bdp > 0 {
                         max_cwnd_augmentation =
                             max_cwnd_augmentation.max(bbr.cwnd.saturating_sub(2 * bbr.bdp));
@@ -4620,7 +4622,7 @@ mod test {
             max_burst > 1,
             "harness should have produced aggregated ACK bursts, max burst was {max_burst}"
         );
-        // BBRUpdateACKAggregation estimated a positive excess from the bursts.
+        // UpdateACKAggregation estimated a positive excess from the bursts.
         assert!(
             max_extra_acked > 0,
             "extra_acked should be positive on an aggregating path in cruise"
@@ -4645,7 +4647,7 @@ mod test {
             }
         }
 
-        // C.cwnd carried the extra_acked headroom: BBRUpdateMaxInflight adds extra_acked on top
+        // C.cwnd carried the extra_acked headroom: UpdateMaxInflight adds extra_acked on top
         // of cwnd_gain*BDP (=2*BDP in cruise). Both sides are peak maxima reduced independently
         // over the sojourn (not necessarily the same round), so this asserts peak augmentation
         // >= peak extra_acked, enough to catch dropping the `+ extra_acked` term.
@@ -4680,9 +4682,9 @@ mod test {
     }
 
     /// A.14: Correctly managing sub-packet BDPs.
-    /// equivalent to BBRInflight / BBRQuantizationBudget (the BBR.MinPipeCwnd floor):
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2>
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.7-4>
+    /// equivalent to BBRInflight / QuantizationBudget (the BBR.MinPipeCwnd floor):
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.4.2>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.8-4>
     ///
     /// On a very slow bottleneck the model-derived congestion window collapses below the
     /// pipelining minimum. `BBR.MinPipeCwnd` (4 * SMSS) is the floor that keeps enough packets
@@ -4977,7 +4979,7 @@ mod test {
     }
 
     /// A.15: Increasing bandwidth 10x and ensuring full bandwidth is reached.
-    /// equivalent to BBRRaiseInflightLongtermSlope / BBRProbeInflightLongtermUpward:
+    /// equivalent to RaiseInflightLongtermSlope / ProbeInflightLongtermUpward:
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.3.9-9>
     ///
     /// After PROBE_BW is reached at a low link rate, the bottleneck bandwidth jumps 10x. In
@@ -5246,7 +5248,7 @@ mod test {
     /// A.16: Decreasing bandwidth 10x and ensuring max bandwidth adapts down.
     /// Exercises the short-term loss response (`loss_lower_bounds`) and the windowed `max_bw`
     /// filter expiry (`advance_max_bw_filter`, `BBR.MaxBwFilterLen`):
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-2.10>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.11>
     ///
     /// After PROBE_BW is reached at a high link rate, the bottleneck bandwidth drops 10x. The
     /// flow is still carrying ~BDP of the *old* (high) rate, so once the link slows the standing
@@ -5473,7 +5475,7 @@ mod test {
     /// A.17: Handling token bucket policers.
     /// Exercises the short-term loss response (`init_lower_bounds` + `loss_lower_bounds`, driven
     /// from `adapt_lower_bounds_from_congestion`) settling the flow to a token-bucket policer's
-    /// token rate: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.3-8>
+    /// token rate: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3-8>
     ///
     /// A token-bucket policer is not a queue. It holds a bucket of `BURST` bytes that refills at
     /// the token rate, admits a packet only if a token is available, and *drops* (never
@@ -5709,7 +5711,7 @@ mod test {
     /// A.18: Handling spurious Fast Recovery (the loss-undo path).
     /// Exercises `save_state_upon_loss` (BBRSaveStateUponLoss) and `on_spurious_congestion_event`
     /// (BBRHandleSpuriousLossDetection):
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.11>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.11>
     ///
     /// Packet reordering (later packets delivered while earlier ones sit apparently missing) makes
     /// the transport's loss detector declare a Fast Recovery that never really happened: the "lost"
@@ -5978,7 +5980,7 @@ mod test {
     /// A.19: Handling spurious RTO Recovery (the loss-undo path, RTO variant).
     /// Exercises `save_state_upon_loss` (BBRSaveStateUponLoss) and `on_spurious_congestion_event`
     /// (BBRHandleSpuriousLossDetection):
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.11>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.11>
     ///
     /// Where A.18 covers a spurious *Fast* Recovery (later packets keep being delivered while a few
     /// earlier ones look missing), this covers a spurious *RTO* Recovery: acknowledgements stop
@@ -6255,8 +6257,8 @@ mod test {
     }
 
     /// A.20: Entering and exiting PROBE_RTT during STARTUP.
-    /// equivalent to BBRCheckProbeRTT / BBRHandleProbeRTT / BBRExitProbeRTT:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3>
+    /// equivalent to CheckProbeRTT / HandleProbeRTT / ExitProbeRTT:
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>
     ///
     /// A.10 covers the PROBE_RTT interlude that fires *after* PROBE_BW, where
     /// `full_bw_reached` is true and `exit_probe_rtt` therefore routes on to
@@ -6286,7 +6288,7 @@ mod test {
     ///
     /// On entry `check_probe_rtt` runs `enter_probe_rtt` (state -> ProbeRtt,
     /// `cwnd_gain` -> ProbeRTTCwndGain 0.5) and clears `probe_rtt_done_stamp`;
-    /// `bound_cwnd_for_probe_rtt` caps cwnd at `BBRProbeRTTCwnd` (~0.5*BDP) so the
+    /// `bound_cwnd_for_probe_rtt` caps cwnd at `ProbeRTTCwnd` (~0.5*BDP) so the
     /// sender stalls until `C.inflight` drains below the cap. When it does,
     /// `handle_probe_rtt` arms `probe_rtt_done_stamp = now + ProbeRTTDuration`
     /// (200 ms) and starts a fresh round; PROBE_RTT then holds until *both* one
@@ -6536,7 +6538,7 @@ mod test {
 
     /// A.21: Handling loss during PROBE_UP after `inflight_longterm` is set.
     /// equivalent to BBRHandleInflightTooHigh:
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.10.2-1>
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2-1>
     ///
     /// The counterpart to A.6 (loss in PROBE_UP while application-limited, where the
     /// `!is_app_limited` guard makes `handle_inflight_too_high` leave
@@ -6778,7 +6780,7 @@ mod test {
     }
 
     /// A.22: Handling application-limited sending during PROBE_REFILL.
-    /// equivalent to BBRUpdateMaxBw <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.5>
+    /// equivalent to UpdateMaxBw <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.5>
     ///
     /// The `!is_app_limited` half of the `update_max_bw` guard
     /// (`delivery_rate >= BBR.max_bw || !RS.is_app_limited`) in isolation: an
