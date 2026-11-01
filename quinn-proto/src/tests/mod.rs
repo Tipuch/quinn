@@ -5339,3 +5339,140 @@ fn qlog_packet_lost_trigger() {
         ]
     );
 }
+
+/// A connection whose application has more to send than flow control lets it write is not
+/// application-limited for delivery-rate samples, though a transmit after an ACK that freed
+/// send-window space finds nothing to send before the application writes again.
+#[test]
+fn flow_control_limited_is_not_application_limited() {
+    let _guard = subscribe();
+    const WINDOW: u64 = 1 << 30;
+
+    #[derive(Default)]
+    struct Seen {
+        /// The application has more to send
+        busy: bool,
+        acks_while_busy: u32,
+        app_limited_while_busy: u32,
+        app_limited_after: u32,
+    }
+
+    impl Seen {
+        fn app_limited(&mut self) {
+            match self.busy {
+                true => self.app_limited_while_busy += 1,
+                false => self.app_limited_after += 1,
+            }
+        }
+    }
+
+    struct Recorder(Arc<Mutex<Seen>>);
+
+    impl Controller for Recorder {
+        fn on_app_limited(&mut self, _in_flight: u64) {
+            self.0.lock().unwrap().app_limited();
+        }
+
+        fn on_end_acks(
+            &mut self,
+            _now: Instant,
+            _in_flight: u64,
+            app_limited: bool,
+            _largest_packet_num_acked: Option<u64>,
+            _space: SpaceId,
+        ) {
+            let mut seen = self.0.lock().unwrap();
+            if seen.busy {
+                seen.acks_while_busy += 1;
+            }
+            if app_limited {
+                seen.app_limited();
+            }
+        }
+
+        fn on_congestion_event(
+            &mut self,
+            _now: Instant,
+            _sent: Instant,
+            _is_persistent_congestion: bool,
+            _is_ecn: bool,
+            _lost_bytes: u64,
+            _largest_lost: u64,
+            _space: SpaceId,
+        ) {
+        }
+
+        fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+        fn window(&self) -> u64 {
+            WINDOW
+        }
+
+        fn metrics(&self) -> ControllerMetrics {
+            // Paced so that a send window's worth takes most of a round trip: ACKs then free
+            // space while the rest is still in flight.
+            ControllerMetrics {
+                congestion_window: WINDOW,
+                pacing_rate: Some(1_000_000),
+                send_quantum: Some(1_200),
+                ..Default::default()
+            }
+        }
+
+        fn clone_box(&self) -> Box<dyn Controller> {
+            Box::new(Self(self.0.clone()))
+        }
+
+        fn initial_window(&self) -> u64 {
+            WINDOW
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+    }
+
+    struct RecorderFactory(Arc<Mutex<Seen>>);
+
+    impl ControllerFactory for RecorderFactory {
+        fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+            Box::new(Recorder(self.0.clone()))
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(Arc::new(RecorderFactory(seen.clone())));
+    transport.send_window(16 * 1024);
+    let mut config = client_config();
+    config.transport_config(Arc::new(transport));
+    let mut pair = Pair::default();
+    // ACKs arrive over the round trip, as on a real path, so the application refills the
+    // window as it frees (a whole window acknowledged at once before the application writes
+    // again is application-limited for that moment).
+    pair.latency = Duration::from_millis(10);
+    let (client_ch, _) = pair.connect_with(config);
+
+    // The application keeps the send window full: it always has more.
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    seen.lock().unwrap().busy = true;
+    let mut sent = 0;
+    for _ in 0..10_000 {
+        while let Ok(n) = pair.client_send(client_ch, s).write(&[0; 4096]) {
+            sent += n;
+        }
+        if sent >= 256 * 1024 {
+            break;
+        }
+        pair.step();
+    }
+    assert!(sent >= 256 * 1024);
+    seen.lock().unwrap().busy = false;
+    pair.client_send(client_ch, s).finish().unwrap();
+    pair.drive();
+
+    let seen = seen.lock().unwrap();
+    assert!(seen.acks_while_busy > 0);
+    assert_eq!(seen.app_limited_while_busy, 0);
+    assert!(seen.app_limited_after > 0, "ran dry once finished");
+}

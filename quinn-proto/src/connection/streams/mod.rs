@@ -248,6 +248,7 @@ impl<'a> SendStream<'a> {
             .get_or_insert_with(|| Send::new(max_send_data));
 
         if limit == 0 {
+            stream.flow_limited = true;
             trace!(
                 stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
                 "write blocked by connection-level flow control or send window"
@@ -267,9 +268,12 @@ impl<'a> SendStream<'a> {
         }
 
         let was_pending = stream.is_pending();
+        // The most this write may take: the connection's limit and the stream's
+        let allowed = limit.min(stream.max_data.saturating_sub(stream.pending.offset()));
         let written = match stream.write(source, limit) {
             Ok(written) => written,
             Err(WriteError::Blocked) => {
+                stream.flow_limited = true;
                 if stream.data_blocked_limit != Some(stream.max_data) {
                     stream.data_blocked_limit = Some(stream.max_data);
                     self.pending.stream_data_blocked.insert(self.id);
@@ -280,6 +284,8 @@ impl<'a> SendStream<'a> {
         };
         self.state.data_sent += written.bytes as u64;
         self.state.buffered_data += written.bytes as u64;
+        // Taking all it was allowed means it may have had more
+        stream.flow_limited = written.bytes as u64 >= allowed;
         trace!(stream = %self.id, "wrote {} bytes", written.bytes);
         if !was_pending {
             self.state.pending.push_pending(self.id, stream.priority);

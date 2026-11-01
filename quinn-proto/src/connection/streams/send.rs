@@ -19,6 +19,9 @@ pub(super) struct Send {
     pub(super) data_blocked_limit: Option<u64>,
     /// The reason the peer wants us to stop, if `STOP_SENDING` was received
     pub(super) stop_reason: Option<VarInt>,
+    /// Whether the application's latest write to this stream was cut short by flow control
+    /// (the send window, or the peer's connection or stream limit)
+    pub(super) flow_limited: bool,
 }
 
 impl Send {
@@ -32,6 +35,7 @@ impl Send {
             connection_blocked: false,
             data_blocked_limit: None,
             stop_reason: None,
+            flow_limited: false,
         })
     }
 
@@ -145,6 +149,17 @@ impl Send {
 
     pub(super) fn is_writable(&self) -> bool {
         matches!(self.state, SendState::Ready)
+    }
+
+    /// Whether flow control holds back data the application has for this stream
+    ///
+    /// Only while data written to it is still unacknowledged, and it has not been finished,
+    /// reset or stopped since.
+    pub(super) fn is_flow_limited(&self) -> bool {
+        self.flow_limited
+            && self.is_writable()
+            && self.stop_reason.is_none()
+            && !self.pending.is_fully_acked()
     }
 }
 
