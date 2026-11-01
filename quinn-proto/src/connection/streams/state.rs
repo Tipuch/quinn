@@ -819,6 +819,17 @@ impl StreamsState {
         Ok(())
     }
 
+    /// Whether flow control holds back data the application has for any stream
+    ///
+    /// The connection then isn't application-limited, even when a transmit finds nothing to
+    /// send: an ACK that frees send-window space is processed before the application writes
+    /// again.
+    pub(crate) fn write_flow_limited(&self) -> bool {
+        self.send
+            .values()
+            .any(|s| s.as_ref().is_some_and(|s| s.is_flow_limited()))
+    }
+
     /// Returns the maximum amount of data this is allowed to be written on the connection
     pub(crate) fn write_limit(&self) -> u64 {
         (self.max_data - self.data_sent)
@@ -1063,6 +1074,100 @@ mod tests {
             (1024 * 1024u32).into(),
             (1024 * 1024u32).into(),
         )
+    }
+
+    /// A stream whose latest write flow control cut short counts as flow-limited while its
+    /// data is in flight: not after a write to it that fits, once all of it is acknowledged,
+    /// or once it is reset, stopped by the peer or finished. Another stream's write that fits
+    /// does not clear it.
+    #[test]
+    fn write_flow_limited() {
+        let mut server = make(Side::Server);
+        server.send_window = 1000;
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 5u32.into(),
+            initial_max_data: 1000u32.into(),
+            initial_max_stream_data_uni: 10u32.into(),
+            ..TransportParameters::default()
+        });
+        let state = ConnState::Established;
+        let open = |server: &mut StreamsState| {
+            Streams {
+                state: server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni)
+            .unwrap()
+        };
+        let ids: Vec<_> = (0..5).map(|_| open(&mut server)).collect();
+        let (a, b, c, d, e) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+        let write = |server: &mut StreamsState, id, data: &[u8]| {
+            SendStream {
+                id,
+                state: server,
+                pending: &mut Retransmits::default(),
+                conn_state: &state,
+            }
+            .write(data)
+        };
+        let acked = |server: &mut StreamsState, id, offsets| {
+            server.received_ack_of(frame::StreamMeta {
+                id,
+                offsets,
+                fin: false,
+            })
+        };
+        // Fits the stream's limit (10).
+        assert_eq!(write(&mut server, a, &[1; 4]), Ok(4));
+        assert!(!server.write_flow_limited());
+        // The stream's limit cuts it short, then refuses it.
+        assert_eq!(write(&mut server, a, &[1; 8]), Ok(6));
+        assert!(server.write_flow_limited());
+        assert_eq!(write(&mut server, a, &[1; 1]), Err(WriteError::Blocked));
+        assert!(server.write_flow_limited());
+        // Another stream's write that fits leaves it.
+        assert_eq!(write(&mut server, b, &[1; 2]), Ok(2));
+        assert!(server.write_flow_limited());
+        // All of it acknowledged: nothing of it in flight.
+        acked(&mut server, a, 0..10);
+        assert!(!server.write_flow_limited());
+        // Cut short by the send window, then reset.
+        server.send_window = server.buffered_data + 3;
+        assert_eq!(write(&mut server, b, &[1; 5]), Ok(3));
+        assert!(server.write_flow_limited());
+        SendStream {
+            id: b,
+            state: &mut server,
+            pending: &mut Retransmits::default(),
+            conn_state: &state,
+        }
+        .reset(0u32.into())
+        .unwrap();
+        assert!(!server.write_flow_limited());
+        // Cut short, then stopped by the peer.
+        server.send_window = 1000;
+        assert_eq!(write(&mut server, c, &[1; 12]), Ok(10));
+        assert!(server.write_flow_limited());
+        server.received_stop_sending(c, 0u32.into());
+        assert!(!server.write_flow_limited());
+        // Cut short, then finished.
+        assert_eq!(write(&mut server, d, &[1; 12]), Ok(10));
+        assert!(server.write_flow_limited());
+        SendStream {
+            id: d,
+            state: &mut server,
+            pending: &mut Retransmits::default(),
+            conn_state: &state,
+        }
+        .finish()
+        .unwrap();
+        assert!(!server.write_flow_limited());
+        // The send window already full: refused outright.
+        assert_eq!(write(&mut server, e, &[1; 3]), Ok(3));
+        assert!(!server.write_flow_limited());
+        server.send_window = server.buffered_data;
+        assert_eq!(write(&mut server, e, &[1; 1]), Err(WriteError::Blocked));
+        assert!(server.write_flow_limited());
     }
 
     #[test]

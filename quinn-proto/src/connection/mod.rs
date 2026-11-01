@@ -990,7 +990,7 @@ impl Connection {
         }
 
         self.app_limited = buf.is_empty() && !send_blocked;
-        if self.app_limited {
+        if self.rate_app_limited() {
             self.path
                 .congestion
                 .on_app_limited(self.path.in_flight.bytes);
@@ -1591,7 +1591,7 @@ impl Connection {
         self.path.congestion.on_end_acks(
             now,
             self.path.in_flight.bytes,
-            self.app_limited,
+            self.rate_app_limited(),
             self.spaces[space].largest_acked_packet,
             space,
         );
@@ -1650,6 +1650,16 @@ impl Connection {
 
         self.set_loss_detection_timer(now);
         Ok(())
+    }
+
+    /// Whether delivery-rate samples are application-limited
+    ///
+    /// Not while flow control holds back data the application has: a transmit after an ACK
+    /// that freed send-window space finds nothing to send before the application writes
+    /// again. `app_limited` itself is left as is: Cubic and NewReno read it in `on_ack` as
+    /// "the window isn't filled, don't grow it", which holds then too.
+    fn rate_app_limited(&self) -> bool {
+        self.app_limited && !self.streams.write_flow_limited()
     }
 
     fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId) -> bool {
